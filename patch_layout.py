@@ -39,6 +39,7 @@ That keeps the patch surface to one attribute we can verify rather than a
 copy of a 90-line constructor that would rot on the next ComfyUI change.
 """
 
+import functools
 import logging
 
 import torch
@@ -49,8 +50,29 @@ MC_KEY = "motion_context_index"
 MC_AUDIO_KEY = "motion_context_audio_end_frame"
 _LOG = logging.getLogger("h3_motion_context")
 
-_orig_init = None
-_applied = False
+_PATCH_MARKER = "_h3_motion_context_layout_patch_v2"
+
+
+def _walk_wrapped(fn):
+    seen = set()
+    while fn is not None and id(fn) not in seen:
+        seen.add(id(fn))
+        yield fn
+        fn = getattr(fn, "__wrapped__", None)
+
+
+def _is_our_wrapper(fn):
+    code = getattr(fn, "__code__", None)
+    return bool(
+        getattr(fn, _PATCH_MARKER, False)
+        and code is not None
+        and code.co_name == "wrapper"
+        and code.co_filename == __file__
+    )
+
+
+def _contains_our_patch(fn):
+    return any(_is_our_wrapper(item) for item in _walk_wrapped(fn))
 
 
 def _ref_cursor_advance(refs):
@@ -181,23 +203,30 @@ def _fixup_audio(layout, text_len, refs):
     layout.position_ids[sel, 0] = t[sel] + shift
 
     # H3_MC_MULTI_REF_AUDIO_SHAREABLE_LAYOUT
+def _make_patched_init(base):
+    # Capture the live base in a closure. A module-global base pointer is unsafe
+    # if another custom node later replaces PackedLayout.__init__ and we need to
+    # wrap the new implementation.
+    @functools.wraps(base, updated=())
+    def wrapper(self, text_len, latent_t, latent_h, latent_w, audio_t,
+                keyframes=None, refs=None, frame_count=None):
+        base(self, text_len, latent_t, latent_h, latent_w, audio_t,
+             keyframes=keyframes, refs=refs, frame_count=frame_count)
+        has_mc_kf = bool(keyframes) and any(
+            kf.get(MC_KEY) is not None for kf in keyframes)
+        has_mc_audio = bool(refs) and any(
+            r.get(MC_AUDIO_KEY) is not None for r in refs)
+        if has_mc_kf:
+            _fixup(self, text_len, latent_t, frame_count, keyframes, refs)
+        if has_mc_audio:
+            _fixup_audio(self, text_len, refs)
+        # neither marked: stock graph, leave it exactly as built
 
-def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
-                  keyframes=None, refs=None, frame_count=None):
-    _orig_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
-               keyframes=keyframes, refs=refs, frame_count=frame_count)
-    has_mc_kf = bool(keyframes) and any(
-        kf.get(MC_KEY) is not None for kf in keyframes)
-    has_mc_audio = bool(refs) and any(
-        r.get(MC_AUDIO_KEY) is not None for r in refs)
-    if has_mc_kf:
-        _fixup(self, text_len, latent_t, frame_count, keyframes, refs)
-    if has_mc_audio:
-        _fixup_audio(self, text_len, refs)
-    # neither marked: stock graph, leave it exactly as built
+    setattr(wrapper, _PATCH_MARKER, True)
+    return wrapper
 
 
-def _self_test():
+def _self_test(base):
     """Prove the rewrite reproduces stock positions before committing.
 
     Builds the two anchors stock code already supports, once the stock way
@@ -214,11 +243,11 @@ def _self_test():
                {"resolved_frame_index": 0, MC_KEY: frame_count - 1}]
 
     a = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(a, text_len, latent_t, lh, lw, audio_t,
+    base(a, text_len, latent_t, lh, lw, audio_t,
                keyframes=stock_kf, frame_count=frame_count)
 
     b = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(b, text_len, latent_t, lh, lw, audio_t,
+    base(b, text_len, latent_t, lh, lw, audio_t,
                keyframes=ours_kf, frame_count=frame_count)
     _fixup(b, text_len, latent_t, frame_count, ours_kf)
 
@@ -232,7 +261,7 @@ def _self_test():
     # the span the two endpoints define
     run = [{"resolved_frame_index": 0, MC_KEY: i} for i in range(4)]
     c = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(c, text_len, latent_t, lh, lw, audio_t,
+    base(c, text_len, latent_t, lh, lw, audio_t,
                keyframes=run, frame_count=frame_count)
     _fixup(c, text_len, latent_t, frame_count, run)
     ts = [float(c.position_ids[s, 0]) for s, _, k in c.segments if k == "cond"]
@@ -257,7 +286,7 @@ def _self_test():
     # advance the cursor, this fails and the patch is not applied.
     ref = [{"kind": "audio", "ref_audio_t": 8}]
     d = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(d, text_len, latent_t, lh, lw, audio_t,
+    base(d, text_len, latent_t, lh, lw, audio_t,
                keyframes=run, refs=ref, frame_count=frame_count)
     _fixup(d, text_len, latent_t, frame_count, run, refs=ref)
     ts_ref = [float(d.position_ids[s, 0]) for s, _, k in d.segments if k == "cond"]
@@ -286,7 +315,7 @@ def _self_test():
     rt = 8
     ref_mc = [{"kind": "audio", "ref_audio_t": rt, MC_AUDIO_KEY: end_frame}]
     e = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(e, text_len, latent_t, lh, lw, audio_t,
+    base(e, text_len, latent_t, lh, lw, audio_t,
                keyframes=run, refs=ref_mc, frame_count=frame_count)
     _fixup(e, text_len, latent_t, frame_count, run, refs=ref_mc)
     _fixup_audio(e, text_len, ref_mc)
@@ -327,12 +356,12 @@ def _self_test():
     refs_marked = [img1, img2, audio_marked]
 
     f = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(f, text_len, latent_t, lh, lw, audio_t,
+    base(f, text_len, latent_t, lh, lw, audio_t,
                keyframes=run, refs=refs_plain, frame_count=frame_count)
     _fixup(f, text_len, latent_t, frame_count, run, refs=refs_plain)
 
     g = mm.PackedLayout.__new__(mm.PackedLayout)
-    _orig_init(g, text_len, latent_t, lh, lw, audio_t,
+    base(g, text_len, latent_t, lh, lw, audio_t,
                keyframes=run, refs=refs_marked, frame_count=frame_count)
     _fixup(g, text_len, latent_t, frame_count, run, refs=refs_marked)
     _fixup_audio(g, text_len, refs_marked)
@@ -378,26 +407,30 @@ def _self_test():
 
 
 def apply_patch():
-    global _orig_init, _applied
-    if _applied:
-        return True
     if not hasattr(mm, "PackedLayout") or not hasattr(mm, "FRAME_RESCALE"):
         _LOG.warning("h3_motion_context: MiniMax H3 model module missing expected "
                      "attributes, patch not applied")
         return False
-    _orig_init = mm.PackedLayout.__init__
+
+    current = mm.PackedLayout.__init__
+    # If our wrapper remains anywhere in the live chain, it is already doing
+    # the MC relocation. Do not stack a second copy: audio relocation is a
+    # deliberate one-pass operation and must not be applied twice.
+    if _contains_our_patch(current):
+        return True
+
     try:
-        _self_test()
+        _self_test(current)
     except Exception as exc:
-        _orig_init = None
         _LOG.warning("h3_motion_context: self-test failed (%s), patch not applied. "
                      "Interior keyframe anchors unavailable.", exc)
         return False
-    mm.PackedLayout.__init__ = _patched_init
-    _applied = True
+
+    mm.PackedLayout.__init__ = _make_patched_init(current)
     _LOG.info("h3_motion_context: interior keyframe anchors enabled")
     return True
 
 
 def is_applied():
-    return _applied
+    return bool(hasattr(mm, "PackedLayout") and
+                _contains_our_patch(mm.PackedLayout.__init__))

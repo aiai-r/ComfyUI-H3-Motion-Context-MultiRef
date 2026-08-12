@@ -1,55 +1,59 @@
 # Example workflows
 
-## Simple Motion Context - No Reference Images.json
+## Recommended context
 
-A simple long-form MiniMax H3 Motion Context chain:
+The updated continuation workflows expose one **GLOBAL CONTEXT FRAMES** control and a separate **GLOBAL VIDEO CROSSFADE** control. Both default to 39.
 
-- Clip 1 starts from text-to-video.
-- Clip 2 is active by default as the first Motion Context continuation.
-- Clips 3-6 are included as optional sequential extensions.
-- Continuations use 22 frames of visual Motion Context in `video / head` mode.
-- Continuations also use 22-frame `timeline` audio context from the preceding sampled joint AV latent via `context_latent`.
-- Decoded IMAGE and AUDIO tensors are concatenated directly; intermediate preview MP4s are not used as source material.
-- Global clip duration and resolution controls are included.
-- Global sampler and step controls drive all six clip slots.
-- Optional attention / speedup nodes are present and bypassed by default.
+```text
+H3-native video runs: 5, 22, 39*, 56, 73, 90*, 107, 124, 141*, 158, 175, 192*, 209, 226, 243*
+* exact video+audio boundary. 39 recommended.
+```
 
-This example does not use Ref2VA reference inputs itself; it is a clean baseline chain for Motion Context behavior.
+Classic Motion Context accepts any frame count. The native values above are especially efficient; starred values also end exactly on H3's 40 Hz audio-latent clock.
 
-Model filenames may need to be changed for another ComfyUI installation.
+The Existing MP4 masked-prefix node is stricter: an off-grid request snaps down to the nearest native full video run because the preserved prefix is written directly into the target H3 latent.
 
-## Layout baseline
+The crossfade control is independent. Update 2's Trim node keeps only the final matching overlap needed by KJNodes, so a longer context (for example 90) can safely use a shorter crossfade (for example 39). Audio always trims the full context.
 
-This workflow is the canonical layout baseline for the example family. Its node spacing, group positions, colors, optional-clip layout, and disabled `Speedups` group should be preserved when deriving later reference-image and patched variants unless a variant specifically requires additional nodes.
+## Workflows
 
-## Advanced Motion Context - Reference Images
+### Simple Motion Context - No Reference Images
 
-`Advanced Motion Context - Reference Images.json`
+- Global visual + timeline-audio context (39 default).
+- KJNodes linear cumulative video stitching; crossfade may be shorter than context safely.
+- Trimmed/hard-appended audio; no audio crossfade.
 
-- Ref2VA with two global character reference images on every clip.
-- 39-frame visual Motion Context plus 39-frame timeline audio context.
-- Requires this fork's multi-ref timeline-audio compatibility patch.
-- Includes the experimental full-previous-audio reference section, muted by default.
-- Uses the same clip-row spacing, Global Settings placement, final-output placement, and disabled Speedups layout as the simple baseline.
-- Final output prefix: `video/motion_context`.
+### Advanced Motion Context - Reference Images
 
-## Music Video Motion Context - Reference Images + Song
+- Same global context/crossfade controls.
+- Ref2VA/MultiRef character references preserved.
+- KJNodes linear cumulative video stitching.
+- Trimmed/hard-appended audio.
 
-`Music Video Motion Context - Reference Images + Song.json`
+### Music Video Motion Context - Song Driven Lipsync + Reference Images
 
-- Ref2VA music-video / lip-sync template with two global character references.
-- Up to 15 sequential clip slots; Clips 1–2 active, Clips 3–15 bypassed by default.
-- 22-frame visual Motion Context only; Motion Context audio is disabled.
-- Each clip receives the matching original-song slice as `<Audio 1>`.
-- Final stitched picture is muxed with the original loaded song.
-- Uses the same core clip spacing, Global Settings placement, final-output placement pattern, and disabled Speedups block as the simple baseline.
-- The MultiRef timeline-audio patch is not required for this visual-only Motion Context variant.
-- Final output prefix: `video/motion_context`.
+- Global **visual-only** Motion Context (39 default).
+- KJNodes linear cumulative video stitching.
+- Original-song slice/final-song architecture remains; slice start times and durations are calculated automatically from the current H3-valid frame count and visual context length.
 
-## Embedded director prompts
+### Advanced Extension of Input Videos
 
-Each example embeds its matching `Director Prompt for your LLM` note directly above the first clip prompt area:
+- Existing video forced to 24 fps and cropped down to /32.
+- Two picture inputs for Ref2VA identity/appearance reference.
+- Source MP4 supplies the temporal video/audio history.
+- Preserved target AV prefix using native #15375-equivalent behavior or the capability-aware compatibility layer.
+- KJNodes linear video overlap.
+- Exact hard-joined audio; no audio crossfade.
 
-- Simple workflow: no-reference-images Motion Context director.
-- Advanced workflow: Ref2VA + 39/39 Motion Context director.
-- Music-video workflow: 15-slot visual-only Motion Context / original-song lip-sync director.
+### Custom Keyframes Example
+
+Unchanged in Update 2.
+
+## Workflow dependencies
+
+The continuation examples expect:
+
+- `ComfyUI-KJNodes`
+- `ComfyUI-VideoHelperSuite`
+
+These are workflow dependencies only; the Motion Context Python package does not import them.

@@ -1,31 +1,45 @@
-# Modified fork notice
+# Fork history and modifications
 
 This repository is a modified version of **NikoDemon80/ComfyUI-H3-Motion-Context**.
 
 - Upstream: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context
 - Original author: NikoDemon80
 - License: GPL-3.0
-- Modification date: 2026-08-09
 
-## Multi-ref timeline-audio compatibility change
+This file records the main changes made in this fork. Dates refer to the fork/update milestones, not to upstream ComfyUI releases.
 
-Upstream Motion Context can combine H3 keyframes and refs, but its timeline-audio path assumes the Motion Context audio ref is the only `minimax_refs` block. That conflicts with Ref2VA graphs that already contain ordinary image/video/audio refs.
+## Initial fork — 2026-08-09
 
-This fork changes two places:
+The initial fork added **Ref2VA/MultiRef + Motion Context timeline-audio coexistence**.
 
-1. **`nodes.py`** preserves existing `minimax_refs` and appends the special Motion Context audio ref last via `conditioning_set_values(..., append=True)`.
-2. **`patch_layout.py`** locates the marked Motion Context audio ref's actual stock coordinate slot after any ordinary refs, then shifts only that block onto the continuation timeline.
+Main changes:
 
-The marked Motion Context audio ref is intentionally required to be the **last ref block**. The runtime self-test additionally covers two ordinary image refs followed by one marked Motion Context timeline-audio ref.
+- Existing `minimax_refs` are preserved instead of being replaced by the Motion Context audio ref.
+- The marked Motion Context timeline-audio ref is appended after ordinary Ref2VA refs.
+- `patch_layout.py` identifies that marked audio block and moves only its timeline coordinates onto the continuation timeline.
+- The Motion Context audio ref is intentionally required to remain the final ref block.
+- Runtime compatibility remains local to the custom node; no ComfyUI source files are modified on disk.
 
-No ComfyUI source files are modified on disk; this remains a runtime patch custom node.
+The fork also established its own example-workflow family around Simple, Advanced/Ref2VA and Music Video continuation use cases.
 
-## Example workflow set
+## Update 1 — 2026-08-10
 
-The upstream example workflows are not included in this fork bundle. The examples folder uses a custom workflow family instead, beginning with `Simple Motion Context - No Reference Images.json` as the stock-compatible baseline. Its layout is intentionally retained as the visual template for later variants.
+Update 1 introduced **H3 Custom Keyframes**.
 
-The example set also includes `Advanced Motion Context - Reference Images.json`, which demonstrates the patched Ref2VA + Motion Context timeline-audio coexistence path. It intentionally follows the same visual layout baseline as the simple workflow while retaining the extra global-reference and experimental full-audio-reference sections.
+Main changes:
 
-The custom example family also includes `Music Video Motion Context - Reference Images + Song.json`, a 15-slot visual-only Motion Context music-video template. It uses exact original-song slices as Ref2VA audio references while keeping recursive Motion Context audio disabled for long-run lip-sync stability.
+- Added the `H3 Custom Keyframes` node for placing images as pinned frames at any position in the generated video, as well as a Custom Keyframes Example workflow.
+- Added a dynamic keyframe UI with configurable positions and support for multiple anchors.
 
-Each custom example workflow now embeds its matching Director Prompt note above Clip 1 so the prompting rules travel with the workflow itself.
+## Update 2 — 2026-08-11
+
+Update 2 was **heavily inspired by ComfyUI pull request #15375 by drozbay**, especially its H3-aware video/audio denoise-mask approach for preserving an existing AV prefix while generating the continuation.
+
+Main changes:
+
+- Added **seamless extension of existing MP4 videos**, including the new `H3 Existing Video Masked Context`, `H3 Assemble Existing Video Extension`, and `H3 Crop Source To /32` nodes plus a new `Advanced Extension of Input Videos.json` example workflow.
+- Added **video overlap blending by default** to the main continuation workflows using KJNodes' `Image Batch Extend With Overlap`; the example workflows now use `linear_blend` to make small reconstruction differences at the seam less visible.
+- Changed the main continuation-workflow default to **39 context frames**, which gives an exact H3 video/audio boundary; longer exact-aligned options include 90, 141, 192 and 243 frames.
+- Improved the Director Prompt notes used by the main example workflows.
+- Added capability-aware ComfyUI compatibility so the required runtime patches only activate when ComfyUI does not already provide the needed functionality.
+- Updated all workflows

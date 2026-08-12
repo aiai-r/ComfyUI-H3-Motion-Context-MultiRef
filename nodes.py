@@ -49,9 +49,14 @@ except ImportError:  # ComfyUI always ships safetensors; belt and braces
 from .patch_layout import (
     MC_KEY,
     MC_AUDIO_KEY,
-    apply_patch as _apply_layout_patch,
 )
-from .patch_payload import apply_patch as _apply_payload_patch
+from .h3_compat import ensure_motion_context_compat
+from .existing_video_extension import (
+    MiniMaxH3ExistingVideoMaskedContext,
+    MiniMaxH3AssembleExtension,
+)
+from .h3_auto_crop32 import MiniMaxH3CropTo32
+from .h3_timing import crossfade_plan
 
 try:
     import torchaudio
@@ -65,27 +70,16 @@ FPS = 24  # H3's native rate; audio latents run at 40 Hz, hence FRAME_RESCALE 5/
 FRAME_RESCALE = 5.0 / 3.0
 AUDIO_HZ = 40.0
 
-# Run lengths the video VAE's downscale formula max(1, (n - 5) // 17 * 5 + 2)
-# actually distinguishes. Anything between two grid points encodes to the same
-# number of latent steps as the lower one, but the steps then cover the FIRST
-# `covered` frames of the input rather than the last: encoding 10 frames yields
-# the same 2 steps as encoding 5, representing frames [-10..-6] of the source
-# clip instead of [-5..-1]. The pinned run would end five frames early and the
-# delivered clip would continue from the wrong instant. So off-grid requests
-# are snapped DOWN before slicing, keeping content and coverage in agreement.
-VIDEO_RUN_GRID = (39, 22, 5, 1)
+# H3's video VAE has exact full-run lengths 5, 22, 39, 56, ... (17k+5).
+# Motion Context accepts ANY exact frame count. Native runs use one temporal VAE
+# encode; off-grid requests automatically fall back to the existing exact
+# per-frame/still conditioning path instead of silently shortening the context.
+# 39/90/141/... also land exactly on H3's 40 Hz audio clock.
 
 
 def _ensure_h3_runtime_patches():
-    """Install both H3 patches on first execution of a node that needs them."""
-    if not _apply_layout_patch():
-        raise RuntimeError(
-            "h3_motion_context: could not enable the MiniMax H3 layout "
-            "extension. Check the ComfyUI console for the self-test error.")
-    if not _apply_payload_patch():
-        raise RuntimeError(
-            "h3_motion_context: could not enable keyframe/ref coexistence. "
-            "Check the ComfyUI console.")
+    """Lazily enable only compatibility needed by classic Motion Context."""
+    ensure_motion_context_compat()
 
 
 def _pixel_frames(latent_t):
@@ -223,12 +217,9 @@ class MiniMaxH3MotionContext:
                 "latent": ("LATENT",),
                 "context_frames": ("IMAGE",),
                 "context_length": ("INT", {
-                    "default": 5, "min": 1, "max": 39,
-                    "tooltip": "Frames of the previous clip to carry over. In "
-                               "video mode only 1, 5, 22 and 39 are distinct; "
-                               "anything else is snapped DOWN to the nearest so "
-                               "the pinned run always ends at the clip's last "
-                               "frame."}),
+                    "default": 39, "min": 1, "max": 9999,
+                    "tooltip": "Any frame count. 39 recommended; 90 for long context. "
+                               "39/90/141/... align exactly to H3 video+audio timing."}),
                 "encode_mode": (["video", "frames"], {
                     "default": "video",
                     "tooltip": "video: one VAE call, motion lives inside the "
@@ -242,14 +233,10 @@ class MiniMaxH3MotionContext:
                                "coordinates overlap the text rows."}),
                 "crop": (["disabled", "center"], {"default": "disabled"}),
                 "audio_context_length": ("INT", {
-                    "default": 22, "min": 0, "max": 240,
-                    "tooltip": "Frames of tail audio to pin, independent of the "
-                               "video window. 0 follows context_length. In "
-                               "timeline mode the window is END-aligned with "
-                               "the pinned video, so 22 with a 22-frame video "
-                               "window overlays it exactly; longer windows "
-                               "extend backwards into vacated coordinate "
-                               "space (untested)."}),
+                    "default": 0, "min": 0, "max": 9999,
+                    "tooltip": "Frames of tail audio to pin. 0 follows "
+                               "context_length; timeline mode end-aligns it "
+                               "with the visual context."}),
                 "audio_mode": (["timeline", "ref"], {
                     "default": "timeline",
                     "tooltip": "timeline: pinned audio gets coordinates on "
@@ -291,7 +278,7 @@ class MiniMaxH3MotionContext:
                    "motion instead of guessing it from a single still.")
 
     def apply(self, conditioning, vae, latent, context_frames, context_length,
-              encode_mode, anchor_mode, crop, audio_context_length=22,
+              encode_mode, anchor_mode, crop, audio_context_length=0,
               audio_mode="timeline", context_latent=None, audio_vae=None,
               context_audio=None):
         _ensure_h3_runtime_patches()
@@ -310,18 +297,6 @@ class MiniMaxH3MotionContext:
             _LOG.warning("h3_motion_context: only %d frames supplied, pinning %d",
                          available, n)
 
-        if encode_mode == "video":
-            # snap down to the VAE grid BEFORE slicing, so the frames encoded
-            # are exactly the frames the latent steps will cover (see
-            # VIDEO_RUN_GRID). Slicing the last n and letting the VAE keep the
-            # first `covered` of them would pin a run ending before the clip
-            # does, and the join would jump by the difference.
-            run = next(g for g in VIDEO_RUN_GRID if g <= n)
-            if run != n:
-                _LOG.warning(
-                    "h3_motion_context: %d frames is off the VAE grid; pinning "
-                    "the last %d instead (usable runs: 1, 5, 22, 39)", n, run)
-            n = run
 
         if n >= frame_count:
             raise ValueError(
@@ -332,8 +307,10 @@ class MiniMaxH3MotionContext:
         # the LAST n frames of the incoming clip become the pinned run
         tail = _resize(context_frames[available - n:], width, height, crop)
 
-        if encode_mode == "video":
-            # one call; the VAE reads the batch axis as time and compresses
+        native_video_run = (n == 1) or (n >= 5 and (n - 5) % 17 == 0)
+        if encode_mode == "video" and native_video_run:
+            # Native H3 temporal run: one VAE call, preserving motion inside
+            # the conditioning latent. 1 frame is H3's special still case.
             enc = vae.encode(tail)
             if getattr(enc, "ndim", 0) != 5:
                 raise ValueError(
@@ -341,21 +318,24 @@ class MiniMaxH3MotionContext:
                     "expected [B,C,T,H,W]. Try encode_mode=frames."
                     % (tuple(getattr(enc, "shape", ())),))
             steps = int(enc.shape[2])
-            offsets = _step_offsets(steps)
             covered = _pixel_frames(steps)
             if covered != n:
-                # n was snapped to the grid above, so a mismatch here means
-                # the VAE's downscale formula changed underneath us and the
-                # pinned content no longer lines up with the positions we
-                # would write. Refuse rather than render a shifted join.
                 raise RuntimeError(
-                    "h3_motion_context: %d frames encoded to %d latent steps "
-                    "covering %d frames; the VAE grid no longer matches "
-                    "VIDEO_RUN_GRID. Upstream VAE change, refusing to run."
+                    "h3_motion_context: exact %d-frame H3 run encoded to %d "
+                    "latent steps covering %d frames; upstream VAE timing "
+                    "changed, refusing to place shifted context."
                     % (n, steps, covered))
             blocks = [enc[:, :, k:k + 1] for k in range(steps)]
+            offsets = _step_offsets(steps)
             span = covered
         else:
+            # Exact arbitrary-length fallback. This is the already-supported
+            # per-frame representation, now selected automatically when a
+            # requested video-mode length is not on H3's temporal run grid.
+            if encode_mode == "video":
+                _LOG.info(
+                    "h3_motion_context: %d-frame context is off the native H3 "
+                    "video-run grid; using exact per-frame conditioning", n)
             blocks, offsets = [], []
             for i in range(n):
                 blocks.append(vae.encode(tail[i:i + 1]))
@@ -497,17 +477,22 @@ class MiniMaxH3MotionContextTrim:
                                "frames/fps exactly. H3 rounds its audio grid up, "
                                "so each clip carries about 8ms of extra sound "
                                "that accumulates at every join in a chain."}),
+                "video_crossfade_frames": ("INT", {
+                    "default": 39, "min": 1, "max": 9999,
+                    "tooltip": "Video overlap retained for final KJ crossfade. "
+                               "Audio still trims the full context."}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO")
-    RETURN_NAMES = ("images", "audio")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "IMAGE", "INT")
+    RETURN_NAMES = ("images", "audio", "crossfade_images", "crossfade_frames")
     FUNCTION = "trim"
     CATEGORY = "conditioning/minimax"
     DESCRIPTION = ("Remove the leading pinned frames from a decoded H3 clip, "
                    "trimming picture and sound by the same duration.")
 
-    def trim(self, images, trim_frames, audio=None, fps=24.0, match_tail=True):
+    def trim(self, images, trim_frames, audio=None, fps=24.0, match_tail=True,
+             video_crossfade_frames=39):
         n = max(0, int(trim_frames))
         total = int(images.shape[0])
         if n >= total:
@@ -515,7 +500,13 @@ class MiniMaxH3MotionContextTrim:
                 "h3_motion_context: asked to trim %d frames from a %d frame clip"
                 % (n, total))
         out_images = images[n:] if n else images
-
+        # Keep only the LAST part of the repeated context for the visual blend.
+        # Example: context=90, crossfade=39 -> drop 51 repeated frames, retain
+        # the final 39 matching frames, then append the genuinely new frames.
+        requested_crossfade = max(1, int(video_crossfade_frames)) if n else 0
+        crossfade_start, effective_crossfade = crossfade_plan(
+            n, requested_crossfade)
+        crossfade_images = images[crossfade_start:] if crossfade_start else images
         out_audio = audio
         if audio is not None:
             waveform = audio["waveform"]
@@ -557,7 +548,7 @@ class MiniMaxH3MotionContextTrim:
                       "this node or it will run %.3fs ahead of the picture.",
                       n, total - n, n / float(fps))
 
-        return (out_images, out_audio)
+        return (out_images, out_audio, crossfade_images, effective_crossfade)
 
 
 def _resolve_latent_path(path, clip_index=0):
@@ -1011,6 +1002,9 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3MotionContextSaveLatent": MiniMaxH3MotionContextSaveLatent,
     "MiniMaxH3MotionContextLoadLatent": MiniMaxH3MotionContextLoadLatent,
     "MiniMaxH3CustomKeyframes": MiniMaxH3CustomKeyframes,
+    "MiniMaxH3ExistingVideoMaskedContext": MiniMaxH3ExistingVideoMaskedContext,
+    "MiniMaxH3AssembleExtension": MiniMaxH3AssembleExtension,
+    "MiniMaxH3CropTo32": MiniMaxH3CropTo32,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContext": "H3 Motion Context",
@@ -1018,4 +1012,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContextSaveLatent": "H3 Motion Context Save Latent",
     "MiniMaxH3MotionContextLoadLatent": "H3 Motion Context Load Latent",
     "MiniMaxH3CustomKeyframes": "H3 Custom Keyframes",
+    "MiniMaxH3ExistingVideoMaskedContext": "H3 Existing Video Masked Context",
+    "MiniMaxH3AssembleExtension": "H3 Assemble Existing Video Extension",
+    "MiniMaxH3CropTo32": "H3 Crop Source To /32",
 }

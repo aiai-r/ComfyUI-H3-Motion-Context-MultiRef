@@ -509,8 +509,13 @@ class MiniMaxH3AssembleExtension:
             "continuation_audio",
         )
 
-        src_want = int(round(int(source_images.shape[0]) / fps * cont_sr))
-        cont_want = int(round(int(continuation_images.shape[0]) / fps * cont_sr))
+        src_frames = int(source_images.shape[0])
+        cont_frames = int(continuation_images.shape[0])
+
+        src_want = int(round(src_frames / fps * cont_sr))
+        total_want = int(round((src_frames + cont_frames) / fps * cont_sr))
+        cont_want = total_want - src_want
+
         src_wave = _fit_waveform(src_wave, src_want, "source audio")
         cont_wave = _fit_waveform(cont_wave, cont_want, "continuation audio")
 

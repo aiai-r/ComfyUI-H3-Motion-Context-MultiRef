@@ -1,4 +1,4 @@
-"""Run Update 2 CPU/static regressions without importing the ComfyUI plugin package.
+"""Run repo CPU/static regressions without importing the ComfyUI plugin package.
 
 ComfyUI custom-node roots contain ``__init__.py`` that expects to be imported by
 ComfyUI. Plain pytest package discovery tries to import that file before the test
@@ -44,7 +44,7 @@ def main():
             module.main()
             passed += 1
             print(f"PASS {path.name}::main")
-    print(f"PASS: {passed} Update 2 CPU/static checks")
+    print(f"PASS: {passed} repo CPU/static checks")
 
 
 if __name__ == "__main__":

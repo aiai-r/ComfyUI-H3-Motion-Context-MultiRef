@@ -57,3 +57,20 @@ The continuation examples expect:
 - `ComfyUI-VideoHelperSuite`
 
 These are workflow dependencies only; the Motion Context Python package does not import them.
+
+
+### H3 Masked AV Extension - One Video Example - 192f
+
+- `VHS_LoadVideo` source normalized to 864×480 at 24 fps.
+- Last 39 AV frames become a protected target-latent prefix; 153 future frames are generated in a 192-frame target.
+- `H3 Motion Context Trim` uses the node's actual preserved-frame count and trims picture/audio together, including H3 audio-tail rounding.
+- `H3 Assemble Existing Video Extension` produces frame/sample-exact final audio.
+- 39-frame KJNodes linear visual overlap remains on the delivered picture.
+- Two `VHS_VideoCombine` outputs are included: the raw unstitched 192-frame H3 clip and the final stitched extension.
+
+### H3 Masked AV Bridge - Two Video Example - 192f
+
+- Two input videos normalized to 24 fps.
+- 39 AV frames are protected at each target endpoint.
+- 114 middle frames are generated.
+- 39-frame KJNodes linear visual overlaps are retained at both delivered joins.

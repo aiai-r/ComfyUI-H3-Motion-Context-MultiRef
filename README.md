@@ -4,6 +4,22 @@
 
 This fork originally focused on making H3 Motion Context work cleanly alongside Ref2VA/MultiRef, including timeline-audio context without replacing ordinary references.
 
+
+## Acknowledgements
+
+The MiniMax H3 video/audio latent masking work in this fork builds on **ComfyUI PR [#15375 — Support per-token video and audio latent noise masks on MiniMax-H3](https://github.com/Comfy-Org/ComfyUI/pull/15375)**, authored by **[Barish Ozbay (`drozbay`)](https://github.com/drozbay)**. That PR introduced the H3-aware per-token video/audio denoise-mask approach that this repo adapts and rebases for its masked existing-video extension and masked AV bridge workflows. Credit for the original H3 AV mask design and upstream implementation belongs to Barish Ozbay.
+
+## Update 3 — Per-Token Noise Masking on Video and Audio Latents
+
+- Added **H3 Masked AV Bridge**, a two-ended MiniMax H3 target-latent bridge built on the repo's PR #15375-style AV denoise-mask compatibility.
+- Added a tested **one-video masked extension** example: 39 preserved AV frames + 153 generated frames in a 192-frame target, with frame/sample-exact audio trimming/assembly and separate VHS raw-H3 + stitched outputs.
+- Added a tested **two-video masked bridge** example: 39 preserved AV frames + 114 generated middle frames + 39 preserved AV frames.
+- Update 3 targets the post-#15439 native H3 guide architecture: normal Motion Context uses native `minimax_keyframes` / `cond_audio`; the #15375 compatibility layer is only used for masked target-latent operations when native equivalent support is absent.
+- Endpoint source frames are written into the actual H3 target latent and protected with `0 = preserve`, `1 = generate`; the examples do not use AddGuide for those endpoint windows.
+- Added bridge and example-workflow regression checks.
+
+See [UPDATE_3_2026-08-14.md](UPDATE_3_2026-08-14.md) and [H3_MASKED_AV_BRIDGE.md](H3_MASKED_AV_BRIDGE.md).
+
 ## Update 2 — 2026-08-11
 
 - **Existing video extension** — seamlessly extend an already existing input video by preserving its final video/audio context and generating the continuation from that point.
@@ -144,7 +160,7 @@ At feature execution time it checks the live implementation for the specific cap
 - H3-specific inpaint scaling,
 - the H3 diffusion-model per-row mask engine.
 
-Native functionality is left untouched. If ComfyUI later merges PR #15375 or equivalent behavior, the corresponding compatibility code becomes a no-op automatically.
+Native functionality is left untouched. If ComfyUI later merges PR #15375 or equivalent behavior, the corresponding compatibility code becomes a no-op automatically. Payload retirement is detected without relying on source-file text: native AV mask output keys or the native MiniMaxH3 AV-mask hook set are sufficient, so stripped builds and ordinary upstream refactors do not keep the fallback wrapper active unnecessarily.
 
 The Motion Context layout compatibility remains repo-specific because it also implements timeline-audio placement and the experimental `before` anchor mode.
 
@@ -155,6 +171,8 @@ The Motion Context layout compatibility remains repo-specific because it also im
 - `Music Video Motion Context - Song Driven Lipsync + Reference Images.json` — 39-frame visual-only Motion Context, KJ crossfade, original-song slice architecture. Song-slice start times and durations are calculated automatically from the current H3-valid frame count and visual context length.
 - `Advanced Extension of Input Videos.json` — advanced existing-MP4 extension with two character reference images, 39-frame masked AV prefix, KJ linear video overlap and exact hard-joined audio.
 - `Custom Keyframes Example.json` — unchanged.
+- `H3 Masked AV Extension - One Video Example - 192f.json` — VHS input, 39-frame masked AV prefix, 153 newly generated frames, frame/sample-exact audio assembly, a 39-frame linear visual overlap, plus separate VHS outputs for the raw 192-frame H3 clip and final stitched result.
+- `H3 Masked AV Bridge - Two Video Example - 192f.json` — two inputs, 39-frame preserved AV windows at both ends, 114 generated middle frames, and linear visual overlaps at both delivered joins.
 
 See [example_workflows/README.md](example_workflows/README.md).
 
@@ -205,4 +223,4 @@ Upstream repository: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context
 
 Relevant ComfyUI compatibility reference:
 
-- PR #15375 — MiniMax H3 AV latent denoise-mask / inpainting support: https://github.com/Comfy-Org/ComfyUI/pull/15375
+- PR [#15375 — Support per-token video and audio latent noise masks on MiniMax-H3](https://github.com/Comfy-Org/ComfyUI/pull/15375), authored by [Barish Ozbay (`drozbay`)](https://github.com/drozbay).

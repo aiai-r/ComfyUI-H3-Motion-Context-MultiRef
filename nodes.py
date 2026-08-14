@@ -1,6 +1,6 @@
-# MODIFIED FORK NOTICE: modified 2026-08-09 to allow ordinary MiniMax H3 Ref2VA refs
-# to coexist with H3 Motion Context timeline-audio refs. Original project by NikoDemon80.
-# See MODIFICATIONS.md. Distributed under the upstream GPL-3.0 license.
+# MODIFIED FORK NOTICE: native-core revision 2026-08-13. Classic Motion Context
+# now uses ComfyUI PR #15439 guide + MultiRef support without core monkey-patches.
+# Original project by NikoDemon80. See MODIFICATIONS.md. GPL-3.0.
 
 """Pin previous-clip motion at the head of an H3 clip.
 
@@ -23,14 +23,10 @@ encode_mode
           stills. Far fewer rows and one VAE load.
 
 anchor_mode
-  head    pinned frames occupy indices 0..N-1 of the delivered timeline.
-          They come back in the output, so trim that many frames off the
-          front before concatenating.
-  before  pinned frames sit at negative indices, ending at -1, so
-          delivered frame 0 continues from them and nothing is wasted.
-          Their time coordinates land below text_len, which is the range
-          the text rows occupy. Whether that collision matters is exactly
-          what this mode is asking.
+  head    native ComfyUI guide at target frame 0. The guided head is returned
+          in the generated clip, so trim that many frames before concatenating.
+  before  legacy research mode from the old PackedLayout monkey-patch; rejected
+          on the native-core path because native guides live on the target timeline.
 """
 
 import json
@@ -46,15 +42,12 @@ try:
 except ImportError:  # ComfyUI always ships safetensors; belt and braces
     _st_load = _st_save = None
 
-from .patch_layout import (
-    MC_KEY,
-    MC_AUDIO_KEY,
-)
 from .h3_compat import ensure_motion_context_compat
 from .existing_video_extension import (
     MiniMaxH3ExistingVideoMaskedContext,
     MiniMaxH3AssembleExtension,
 )
+from .h3_masked_bridge import MiniMaxH3MaskedAVBridge
 from .h3_auto_crop32 import MiniMaxH3CropTo32
 from .h3_timing import crossfade_plan
 
@@ -77,8 +70,8 @@ AUDIO_HZ = 40.0
 # 39/90/141/... also land exactly on H3's 40 Hz audio clock.
 
 
-def _ensure_h3_runtime_patches():
-    """Lazily enable only compatibility needed by classic Motion Context."""
+def _ensure_h3_native_guide_support():
+    """Verify native #15439 guide/MultiRef support; never patch H3 core."""
     ensure_motion_context_compat()
 
 
@@ -227,10 +220,8 @@ class MiniMaxH3MotionContext:
                                "each pinned as a separate still."}),
                 "anchor_mode": (["head", "before"], {
                     "default": "head",
-                    "tooltip": "head: pinned frames occupy the first indices and "
-                               "come back in the output, so trim them. before: "
-                               "negative indices, nothing wasted, but the "
-                               "coordinates overlap the text rows."}),
+                    "tooltip": "head uses native ComfyUI guide semantics at frame 0. "
+                               "before is a legacy mode and is rejected on native core."}),
                 "crop": (["disabled", "center"], {"default": "disabled"}),
                 "audio_context_length": ("INT", {
                     "default": 0, "min": 0, "max": 9999,
@@ -281,7 +272,14 @@ class MiniMaxH3MotionContext:
               encode_mode, anchor_mode, crop, audio_context_length=0,
               audio_mode="timeline", context_latent=None, audio_vae=None,
               context_audio=None):
-        _ensure_h3_runtime_patches()
+        _ensure_h3_native_guide_support()
+
+        if anchor_mode != "head":
+            raise ValueError(
+                "h3_motion_context: anchor_mode='before' belonged to the old "
+                "PackedLayout monkey-patch and is intentionally unsupported on "
+                "native ComfyUI guides. Use head mode and trim the duplicated head."
+            )
 
         video = _video_from_latent(latent)
         latent_t = int(video.shape[2])
@@ -294,137 +292,122 @@ class MiniMaxH3MotionContext:
         if n < 1:
             raise ValueError("h3_motion_context: context_frames is empty")
         if n < context_length:
-            _LOG.warning("h3_motion_context: only %d frames supplied, pinning %d",
-                         available, n)
-
-
+            _LOG.warning(
+                "h3_motion_context: only %d frames supplied, guiding with %d",
+                available, n)
         if n >= frame_count:
             raise ValueError(
-                "h3_motion_context: asked to pin %d frames into a %d frame clip. "
-                "The pinned run must be a small fraction of the timeline."
+                "h3_motion_context: asked to guide %d frames in a %d-frame clip; "
+                "the guide must leave room for newly generated frames."
                 % (n, frame_count))
 
-        # the LAST n frames of the incoming clip become the pinned run
+        # Native #15439 guide semantics: a valid H3 clip is ONE keyframe whose
+        # latent may contain many temporal tokens. PackedLayout assigns one
+        # native cond segment with the model's own _video_grid(). Off-grid
+        # requests fall back to native arbitrary-position still guides.
         tail = _resize(context_frames[available - n:], width, height, crop)
-
         native_video_run = (n == 1) or (n >= 5 and (n - 5) % 17 == 0)
+        keyframes = []
         if encode_mode == "video" and native_video_run:
-            # Native H3 temporal run: one VAE call, preserving motion inside
-            # the conditioning latent. 1 frame is H3's special still case.
             enc = vae.encode(tail)
             if getattr(enc, "ndim", 0) != 5:
                 raise ValueError(
-                    "h3_motion_context: video-mode encode returned shape %s, "
-                    "expected [B,C,T,H,W]. Try encode_mode=frames."
-                    % (tuple(getattr(enc, "shape", ())),))
-            steps = int(enc.shape[2])
-            covered = _pixel_frames(steps)
+                    "h3_motion_context: guide video encoded to %s; expected "
+                    "[B,C,T,H,W]" % (tuple(getattr(enc, "shape", ())),))
+            covered = _pixel_frames(int(enc.shape[2]))
             if covered != n:
                 raise RuntimeError(
-                    "h3_motion_context: exact %d-frame H3 run encoded to %d "
-                    "latent steps covering %d frames; upstream VAE timing "
-                    "changed, refusing to place shifted context."
-                    % (n, steps, covered))
-            blocks = [enc[:, :, k:k + 1] for k in range(steps)]
-            offsets = _step_offsets(steps)
+                    "h3_motion_context: exact %d-frame guide encoded to a latent "
+                    "covering %d frames; refusing a phase-shifted guide." % (n, covered))
+            keyframes.append({"resolved_frame_index": 0, "latent": enc})
+            guide_kind = "native clip"
             span = covered
         else:
-            # Exact arbitrary-length fallback. This is the already-supported
-            # per-frame representation, now selected automatically when a
-            # requested video-mode length is not on H3's temporal run grid.
             if encode_mode == "video":
                 _LOG.info(
                     "h3_motion_context: %d-frame context is off the native H3 "
-                    "video-run grid; using exact per-frame conditioning", n)
-            blocks, offsets = [], []
+                    "clip grid; using native per-frame guides", n)
             for i in range(n):
-                blocks.append(vae.encode(tail[i:i + 1]))
-                offsets.append(i)
+                enc = vae.encode(tail[i:i + 1])
+                if getattr(enc, "ndim", 0) != 5 or int(enc.shape[2]) != 1:
+                    raise ValueError(
+                        "h3_motion_context: frame %d encoded to %s; expected one "
+                        "H3 still latent" % (i, tuple(getattr(enc, "shape", ()))))
+                keyframes.append({"resolved_frame_index": i, "latent": enc})
+            guide_kind = "native still sequence"
             span = n
-
-        if anchor_mode == "before":
-            indices = [o - span for o in offsets]
-        else:
-            indices = list(offsets)
-
-        keyframes = []
-        for p, blk in zip(indices, blocks):
-            keyframes.append({
-                # stock code accepts only 0 or frame_count-1 here; the real
-                # position rides under MC_KEY and the layout patch applies it
-                "resolved_frame_index": 0,
-                MC_KEY: p,
-                "latent": blk,
-            })
-
-        values = {
-            "minimax_keyframes": keyframes,
-            "minimax_frame_count": frame_count,
-        }
 
         ref_audio_t = 0
         a_frames = 0
         audio_src = "off"
         if context_latent is not None or context_audio is not None:
-            # the audio window is independent of the video one: audio cond
-            # rows cost rows but never cost delivered frames
             a_frames = int(audio_context_length) or span
+            if a_frames < 1:
+                raise ValueError("h3_motion_context: audio context window is empty")
             if context_latent is not None:
                 if context_audio is not None:
-                    _LOG.info("h3_motion_context: both context_latent and "
-                              "context_audio wired; using the latent (skips "
-                              "one VAE round trip).")
-                audio_latent, ref_audio_t, overhang = _audio_tail_from_latent(
+                    _LOG.info(
+                        "h3_motion_context: both context_latent and context_audio "
+                        "wired; using latent audio to avoid a VAE round trip")
+                audio_latent, ref_audio_t, _unused_overhang = _audio_tail_from_latent(
                     context_latent, a_frames)
                 audio_src = "latent"
             else:
                 if audio_vae is None:
                     raise ValueError(
-                        "h3_motion_context: context_audio supplied without "
-                        "audio_vae. Wire the H3 audio VAE, or wire "
-                        "context_latent instead.")
+                        "h3_motion_context: context_audio supplied without audio_vae")
                 audio_latent, ref_audio_t = _encode_tail_audio(
                     audio_vae, context_audio, a_frames / float(FPS))
-                overhang = 0.0  # decoded audio was match_tail-cut at the frame
                 audio_src = "vae"
-            ref = {
-                "kind": "audio",
-                "ref_audio_t": ref_audio_t,
-                "audio_latent": audio_latent,
-            }
+
             if audio_mode == "timeline":
-                # end-align the audio window with the pinned video: both are
-                # the tail of clip A, so both must end at the same instant
-                # of the new timeline -- frame `span` in head mode (where
-                # A's last frame sits), frame 0 in before mode. On the
-                # latent path the sliced content reaches `overhang` of a
-                # step past A's last frame (H3 rounds its audio grid up),
-                # so the end coordinate moves by exactly that much; the
-                # layout patch takes a fractional frame index.
-                end_frame = float(span if anchor_mode == "head" else 0)
-                end_frame += overhang / FRAME_RESCALE
-                ref[MC_AUDIO_KEY] = end_frame
-            # Preserve existing Ref2VA refs; append MC audio after normal conditioning.
-            motion_context_audio_ref = ref  # H3_MC_MULTI_REF_AUDIO_SHAREABLE_APPEND
+                if a_frames > span:
+                    raise ValueError(
+                        "h3_motion_context: native timeline audio longer than the "
+                        "visual guide would need to start before target frame 0. "
+                        "Use audio_context_length <= context_length or ref mode.")
+                audio_start = int(span - a_frames)
+                # Native #15439 audio guide: cond_audio rows share the guide's
+                # target-relative time origin. Attach to an existing keyframe at
+                # that index when possible, otherwise add an audio-only guide.
+                holder = next(
+                    (kf for kf in keyframes
+                     if int(kf.get("resolved_frame_index", -999999)) == audio_start),
+                    None)
+                if holder is None:
+                    holder = {"resolved_frame_index": audio_start}
+                    keyframes.append(holder)
+                holder["audio_latent"] = audio_latent
+            else:
+                # Keep an explicit stock-reference mode for research/backward
+                # compatibility; native timeline mode should be preferred.
+                ref = {
+                    "kind": "audio",
+                    "ref_audio_t": ref_audio_t,
+                    "audio_latent": audio_latent,
+                }
+                conditioning = node_helpers.conditioning_set_values(
+                    conditioning, {"minimax_refs": [ref]}, append=True)
 
-        out = node_helpers.conditioning_set_values(conditioning, values)
-        if ref_audio_t:
-            # append=True preserves existing Ref2VA refs and places the
-            # Motion Context timeline-audio ref last.
-            out = node_helpers.conditioning_set_values(
-                out, {"minimax_refs": [motion_context_audio_ref]}, append=True)
+        # Match stock MiniMaxH3AddGuide behavior: preserve any keyframes already
+        # present, then append our guide(s). Ref2VA refs live separately in
+        # minimax_refs and current ComfyUI merges both payload families natively.
+        existing = list(conditioning[0][1].get("minimax_keyframes", []))
+        existing.extend(keyframes)
+        out = node_helpers.conditioning_set_values(
+            conditioning, {"minimax_keyframes": existing})
 
-        trim = span if anchor_mode == "head" else 0
-        _LOG.info("h3_motion_context: %s/%s, %d frames -> %d cond blocks at "
-                  "indices %d..%d, %d frame clip at %dx%d, trim %d, audio %s",
-                  encode_mode, anchor_mode, n, len(blocks),
-                  indices[0], indices[-1], frame_count, width, height, trim,
-                  ("%d frames -> %d latent steps (%.3fs) from %s, %s"
-                   % (a_frames, ref_audio_t, ref_audio_t / AUDIO_HZ, audio_src,
-                      "on the timeline ending at frame %.3f"
-                      % float(ref.get(MC_AUDIO_KEY))
-                      if audio_mode == "timeline" else "stock ref placement"))
-                  if ref_audio_t else "off")
+        trim = span
+        _LOG.info(
+            "h3_motion_context: native #15439 %s/head, %d frames at target 0, "
+            "%d guide block(s), %d-frame target at %dx%d, trim %d, audio %s",
+            guide_kind, n, len(keyframes), frame_count, width, height, trim,
+            ("%d frames -> %d latent steps (%.3fs) from %s as native cond_audio"
+             % (a_frames, ref_audio_t, ref_audio_t / AUDIO_HZ, audio_src))
+            if ref_audio_t and audio_mode == "timeline"
+            else ("%d frames -> %d latent steps from %s as ordinary ref"
+                  % (a_frames, ref_audio_t, audio_src))
+            if ref_audio_t else "off")
         return (out, trim)
 
 
@@ -862,7 +845,7 @@ class MiniMaxH3CustomKeyframes:
         crop="disabled",
         **kwargs,
     ):
-        _ensure_h3_runtime_patches()
+        _ensure_h3_native_guide_support()
 
         try:
             state = json.loads(keyframe_state or "{}")
@@ -964,20 +947,12 @@ class MiniMaxH3CustomKeyframes:
                 )
 
             keyframes.append({
-                # Stock PackedLayout accepts frame 0 here. The real temporal
-                # location is applied lazily through MC_KEY.
-                "resolved_frame_index": 0,
-                MC_KEY: int(pixel_index),
+                "resolved_frame_index": int(pixel_index),
                 "latent": encoded,
             })
 
         out = node_helpers.conditioning_set_values(
-            conditioning,
-            {
-                "minimax_keyframes": keyframes,
-                "minimax_frame_count": frame_count,
-            },
-        )
+            conditioning, {"minimax_keyframes": keyframes})
 
         shown = [
             p + 1 if indexing == "1-based" else p
@@ -1003,6 +978,7 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3MotionContextLoadLatent": MiniMaxH3MotionContextLoadLatent,
     "MiniMaxH3CustomKeyframes": MiniMaxH3CustomKeyframes,
     "MiniMaxH3ExistingVideoMaskedContext": MiniMaxH3ExistingVideoMaskedContext,
+    "MiniMaxH3MaskedAVBridge": MiniMaxH3MaskedAVBridge,
     "MiniMaxH3AssembleExtension": MiniMaxH3AssembleExtension,
     "MiniMaxH3CropTo32": MiniMaxH3CropTo32,
 }
@@ -1013,6 +989,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContextLoadLatent": "H3 Motion Context Load Latent",
     "MiniMaxH3CustomKeyframes": "H3 Custom Keyframes",
     "MiniMaxH3ExistingVideoMaskedContext": "H3 Existing Video Masked Context",
+    "MiniMaxH3MaskedAVBridge": "H3 Masked AV Bridge",
     "MiniMaxH3AssembleExtension": "H3 Assemble Existing Video Extension",
     "MiniMaxH3CropTo32": "H3 Crop Source To /32",
 }

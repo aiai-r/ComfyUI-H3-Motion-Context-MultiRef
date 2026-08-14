@@ -89,3 +89,19 @@ Main changes:
 - Kept linear visual overlap in the delivered examples to smooth source-pixel vs VAE-reconstruction differences.
 - Normal Motion Context remains native #15439 guide conditioning. The #15375-equivalent compatibility path remains lazy and capability-aware, so it is activated only for masked target-latent features when the running ComfyUI core lacks equivalent H3 AV-mask behavior.
 - Strengthened #15375 self-retirement detection for AV-mask payload extraction: native payload keys or the native MiniMaxH3 AV-mask hook set suppress the fallback wrapper, without depending on `inspect.getsource()`; added explicit native-payload no-op and legacy-wrapper regression tests.
+
+## Update 4 — FL2VA Exact Song-Latent Masking
+
+Update 4 adds an experimental song-driven FL2VA path that treats the original song as part of H3's target AV latent rather than as an audio reference.
+
+Main changes:
+
+- Added `H3 Song Audio + Masked Video Context` (`MiniMaxH3SongMaskedAVContext`).
+- The node takes the target joint H3 AV latent, extracts the exact requested interval from a master audio file, resamples to the audio VAE rate when required, encodes it into the target audio stream, and sets the full audio denoise mask to `0`.
+- Optional previous-clip frames are canonicalized to 24 fps, reduced to a valid native H3 run, VAE-encoded into the target video prefix, and protected independently with a video mask of `0` over only that prefix.
+- The remaining video region keeps mask value `1`, so H3 can generate new picture content while the song audio remains fixed.
+- Reference-image conditioning remains available through the stock `MiniMaxH3ReferenceToVideo` conditioning path. No `ref_audio_*` connection is required for the song.
+- Added a reproducible FL2VA music-video example with two reference images, original master audio, 39-frame continuation context, KJ linear visual blending, and final output using the untouched master soundtrack.
+- Added CPU/static regression coverage for both the node behavior and the delivered workflow structure.
+
+This path still depends on the same capability-aware PR #15375-style H3 AV denoise-mask support used by Update 3 when equivalent native support is absent.

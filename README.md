@@ -9,6 +9,17 @@ This fork originally focused on making H3 Motion Context work cleanly alongside 
 
 The MiniMax H3 video/audio latent masking work in this fork builds on **ComfyUI PR [#15375 — Support per-token video and audio latent noise masks on MiniMax-H3](https://github.com/Comfy-Org/ComfyUI/pull/15375)**, authored by **[Barish Ozbay (`drozbay`)](https://github.com/drozbay)**. That PR introduced the H3-aware per-token video/audio denoise-mask approach that this repo adapts and rebases for its masked existing-video extension and masked AV bridge workflows. Credit for the original H3 AV mask design and upstream implementation belongs to Barish Ozbay.
 
+## Update 4 — FL2VA Exact Song-Latent Masking
+
+- Added **H3 Song Audio + Masked Video Context** (`MiniMaxH3SongMaskedAVContext`) for song-driven FL2VA generation.
+- The node slices the original master audio on the project timeline, VAE-encodes that exact interval into H3's target audio latent, and sets the full audio denoise mask to `0` so the sampler changes only the video stream.
+- Continuation clips can independently preserve a previous decoded video tail at the head of the target latent while leaving the rest of the video stream denoisable.
+- Reference images remain available through `MiniMaxH3ReferenceToVideo`; the song does **not** need to occupy a `ref_audio_*` socket.
+- Added a reproducible FL2VA music-video example with two image references, the master-song asset, linear visual overlap, and the untouched master song attached to the final render.
+- Added static workflow coverage that verifies the FL2VA checkpoint, disconnected audio-reference sockets, song-latent nodes, reference-image wiring, final master-audio output, and included assets.
+
+See [UPDATE_4_2026-08-14.md](UPDATE_4_2026-08-14.md) and [the reproducible example notes](example_workflows/H3%20FL2VA%20Song%20Latent%20Masking%20-%20README.md).
+
 ## Update 3 — Per-Token Noise Masking on Video and Audio Latents
 
 - Added **H3 Masked AV Bridge**, a two-ended MiniMax H3 target-latent bridge built on the repo's PR #15375-style AV denoise-mask compatibility.
@@ -173,6 +184,7 @@ The Motion Context layout compatibility remains repo-specific because it also im
 - `Custom Keyframes Example.json` — unchanged.
 - `H3 Masked AV Extension - One Video Example - 192f.json` — VHS input, 39-frame masked AV prefix, 153 newly generated frames, frame/sample-exact audio assembly, a 39-frame linear visual overlap, plus separate VHS outputs for the raw 192-frame H3 clip and final stitched result.
 - `H3 Masked AV Bridge - Two Video Example - 192f.json` — two inputs, 39-frame preserved AV windows at both ends, 114 generated middle frames, and linear visual overlaps at both delivered joins.
+- `H3 FL2VA Song Latent Masking - Reference Images - Music Video.json` — FL2VA + two image references + exact master-song audio inserted into the target H3 audio latent with audio denoise mask `0`; later clips independently protect a 39-frame visual prefix, and the final export uses the untouched master song.
 
 See [example_workflows/README.md](example_workflows/README.md).
 
@@ -181,7 +193,8 @@ See [example_workflows/README.md](example_workflows/README.md).
 The updated continuation examples use:
 
 - **ComfyUI-KJNodes** for `Image Batch Extend With Overlap`,
-- **ComfyUI-VideoHelperSuite** for video loading/preview/output where present.
+- **ComfyUI-VideoHelperSuite** for video loading/preview/output where present,
+- **rgthree-comfy** for the optional-clip group bypass control in the FL2VA song-latent music-video example.
 
 These are example-workflow dependencies only.
 
@@ -192,7 +205,8 @@ These are example-workflow dependencies only.
 - Masked MP4 prefix lengths must be native H3 full video runs (`5`, `22`, `39`, `56`, ...); off-grid requests snap down.
 - The masked prefix primarily solves the **join/seam** problem. It does not guarantee that H3 keeps the same composition indefinitely after leaving the preserved prefix.
 - Turbo/speedup settings can affect continuation behavior; do not assume one continuation-safe LoRA strength for every source/seed.
-- Long recursive generated-audio chains remain lossy. For fixed-song lip-sync, the Music Video workflow continues to use original-song timeline slices instead.
+- Long recursive generated-audio chains remain lossy. For fixed-song lip-sync, prefer the Update 4 FL2VA song-latent path so every clip is conditioned by the original master timeline rather than recursively generated H3 audio.
+- `H3 Song Audio + Masked Video Context` pads with silence if a requested clip extends past the end of the supplied master audio. The included example intentionally lets the final raw clip overrun the song and uses `trim_to_audio` on the final master-song render.
 
 ## Development / regression checks
 
@@ -213,7 +227,8 @@ The suite covers:
 - native-capability no-op behavior,
 - H3 timing helpers and preferred AV boundaries,
 - updated workflow context/crossfade wiring,
-- Music Video 39-frame song-slice timeline defaults.
+- Music Video 39-frame song-slice timeline defaults,
+- FL2VA exact-song latent masking and reproducible example-workflow wiring.
 
 ## License / upstream
 

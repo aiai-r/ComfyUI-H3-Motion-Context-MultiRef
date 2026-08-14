@@ -1,0 +1,21 @@
+H3 FL2VA Song-Latent Example Validation
+=======================================
+Workflow nodes: 228
+UNET: minimax_h3_fl2va_pruned_int8_convrot.safetensors
+ReferenceToVideo nodes: 15
+SongMaskedAVContext nodes: 15
+Connected ref_audio sockets: 0
+Expected asset filenames:
+  LoadImage: be6f4e89-4c3e-43e0-93f5-cc723ccd9b14.png
+  LoadImage: c90ee577-98eb-4f6c-9b0c-562a6b448d69.png
+  LoadAudio: I'll Know You by the Scar.wav
+Master song: 72.28s, 48000 Hz, 2 channels
+
+PASS FL2VA checkpoint
+PASS Two LoadImage refs
+PASS One LoadAudio master
+PASS No audio-reference links
+PASS Song latent masking nodes present
+PASS Face asset present
+PASS Full-body asset present
+PASS Master song present

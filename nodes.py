@@ -48,6 +48,7 @@ from .existing_video_extension import (
     MiniMaxH3AssembleExtension,
 )
 from .h3_masked_bridge import MiniMaxH3MaskedAVBridge
+from .h3_song_audio_context import MiniMaxH3SongMaskedAVContext
 from .h3_auto_crop32 import MiniMaxH3CropTo32
 from .h3_timing import crossfade_plan
 
@@ -979,6 +980,7 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3CustomKeyframes": MiniMaxH3CustomKeyframes,
     "MiniMaxH3ExistingVideoMaskedContext": MiniMaxH3ExistingVideoMaskedContext,
     "MiniMaxH3MaskedAVBridge": MiniMaxH3MaskedAVBridge,
+    "MiniMaxH3SongMaskedAVContext": MiniMaxH3SongMaskedAVContext,
     "MiniMaxH3AssembleExtension": MiniMaxH3AssembleExtension,
     "MiniMaxH3CropTo32": MiniMaxH3CropTo32,
 }
@@ -990,6 +992,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3CustomKeyframes": "H3 Custom Keyframes",
     "MiniMaxH3ExistingVideoMaskedContext": "H3 Existing Video Masked Context",
     "MiniMaxH3MaskedAVBridge": "H3 Masked AV Bridge",
+    "MiniMaxH3SongMaskedAVContext": "H3 Song Audio + Masked Video Context",
     "MiniMaxH3AssembleExtension": "H3 Assemble Existing Video Extension",
     "MiniMaxH3CropTo32": "H3 Crop Source To /32",
 }

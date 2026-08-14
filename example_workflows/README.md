@@ -74,3 +74,15 @@ These are workflow dependencies only; the Motion Context Python package does not
 - 39 AV frames are protected at each target endpoint.
 - 114 middle frames are generated.
 - 39-frame KJNodes linear visual overlaps are retained at both delivered joins.
+
+### H3 FL2VA Song Latent Masking - Reference Images - Music Video
+
+- Uses an FL2VA checkpoint while retaining two image references through `MiniMaxH3ReferenceToVideo`.
+- Keeps every `ref_audio_*` input disconnected; the master song is not an audio reference.
+- `H3 Song Audio + Masked Video Context` writes the exact master-song interval into the target H3 audio latent and protects the entire audio stream with denoise mask `0`.
+- Clip 1 generates all video frames. Later enabled clips independently preserve the prior 39-frame decoded video tail and generate only the new visual region.
+- KJNodes performs the 39-frame linear visual blend between clips.
+- The final VHS output attaches the untouched full master song and trims the accumulated video to the song duration.
+- Reproduction assets and exact model filenames are documented in `H3 FL2VA Song Latent Masking - README.md`.
+
+This example additionally uses **rgthree-comfy** for its optional-clip group bypass control.

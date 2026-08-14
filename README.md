@@ -1,4 +1,13 @@
-# H3 Motion Context — MultiRef + Existing Video Extension
+# H3 Motion Context — MultiRef with per-token noise masking on audio and video latents and custom keyframes
+
+## 🎬 FL2VA Latent Audio Masking Song Demo
+https://github.com/user-attachments/assets/33e22c59-d23f-4470-b52a-6fabb0e4a66b
+**Full 72-second generated example.** FL2VA uses two image references while the
+original master song is encoded directly into H3's audio latent and protected
+with an audio denoise mask of `0`. No `ref_audio_*` input is connected.
+
+The complete reproducible workflow, reference images, song, and lyrics are
+included in [`example_workflows/`](example_workflows/).
 
 > **Modified fork.** Original project by [NikoDemon80](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context), licensed GPL-3.0.
 

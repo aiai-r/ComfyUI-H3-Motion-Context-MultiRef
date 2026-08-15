@@ -89,6 +89,29 @@ def _streams_from_latent(latent) -> Tuple[torch.Tensor, torch.Tensor]:
     return video, audio
 
 
+def _collision_safe_numbered_output_path(
+    folder: str, filename: str, counter: int, suffix: str
+) -> Tuple[str, int]:
+    """Return the first unused numbered output path.
+
+    ComfyUI's get_save_image_path() counter detection is tailored to its usual
+    image/video filename layouts.  H3 final assemblers append ``-audio`` after
+    the numeric counter, so some ComfyUI versions can hand us the same counter
+    again on a later queue.  ffmpeg is invoked with ``-y``, which would then
+    silently overwrite the previous render.
+
+    Keep the existing public filename format, but never trust the suggested
+    counter blindly: walk forward until the complete target path is unused.
+    """
+    os.makedirs(folder, exist_ok=True)
+    current = max(1, int(counter))
+    while True:
+        path = os.path.join(folder, "%s_%05d%s" % (filename, current, suffix))
+        if not os.path.exists(path):
+            return path, current
+        current += 1
+
+
 def _checkpoint_save_path(filename_prefix: str, clip_index: int) -> str:
     prefix = (filename_prefix or "").strip().strip('"').strip("'")
     if not prefix:
@@ -1300,7 +1323,9 @@ class MiniMaxH3AssembleCheckpoints:
             filename_prefix, folder_paths.get_output_directory()
         )
         os.makedirs(folder, exist_ok=True)
-        out_path = os.path.join(folder, "%s_%05d-audio.mp4" % (filename, counter))
+        out_path, counter = _collision_safe_numbered_output_path(
+            folder, filename, counter, "-audio.mp4"
+        )
 
         tempdir = tempfile.mkdtemp(prefix="h3_checkpoint_assembly_")
         audio_raw = os.path.join(tempdir, "master.f32le")
@@ -1686,7 +1711,9 @@ class MiniMaxH3AssembleExtensionCheckpoints:
                 filename_prefix, folder_paths.get_output_directory()
             )
             os.makedirs(folder, exist_ok=True)
-            out_path = os.path.join(folder, "%s_%05d-audio.mp4" % (filename, counter))
+            out_path, counter = _collision_safe_numbered_output_path(
+                folder, filename, counter, "-audio.mp4"
+            )
 
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
@@ -2071,7 +2098,9 @@ class MiniMaxH3AssembleStarterOrExtensionCheckpoints:
                 filename_prefix, folder_paths.get_output_directory()
             )
             os.makedirs(folder, exist_ok=True)
-            out_path = os.path.join(folder, "%s_%05d-audio.mp4" % (filename, counter))
+            out_path, counter = _collision_safe_numbered_output_path(
+                folder, filename, counter, "-audio.mp4"
+            )
 
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
@@ -2325,7 +2354,9 @@ class MiniMaxH3PreviewCheckpointVideo:
                 filename_prefix, folder_paths.get_output_directory()
             )
             os.makedirs(folder, exist_ok=True)
-            out_path = os.path.join(folder, "%s_%05d.mp4" % (filename, counter))
+            out_path, counter = _collision_safe_numbered_output_path(
+                folder, filename, counter, ".mp4"
+            )
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "rawvideo", "-vcodec", "rawvideo",

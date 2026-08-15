@@ -6,7 +6,7 @@
 c79ab9a61f64f9ebf3630331af2d6371f0d03420c4a66a3ca72f9b5ee40a051d  ./example_workflows/NEW - Latent Masking - AV Bridge - Two Videos.json
 9a956dad76ad64678f10e1e96d75d6c9d253e2303f0b24da385b27c8a91d18ac  ./example_workflows/NEW - Latent Masking - AV Extension - Minimal Single Clip.json
 dfcbc6759aa27bb2f521856a2e3584cbb5d8661b9bee70926bdbeb2c4cab02d9  ./example_workflows/NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images.json
-a79d02cf027c63fabce8c69bc813fb9ab51fa8ac29483a9c524c5956f616d489  ./example_workflows/NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json
+353400aefc54c4bac4df2fb8612ac6092eb0ff6674fc4f17751753036c89abcb  ./example_workflows/NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json
 1e010de338f1bbf0302ff378edc3b4ba4315b2449d79eb45e935795dbeb28175  ./example_workflows/OLD - Hybrid - Input Video Extension + Motion Context - Reference Images.json
 67f122be0899ef1e4a6aed384dd3b951decf723a57a9d0badc2c1330140a4786  ./example_workflows/OLD - Motion Context - Advanced - Reference Images.json
 cf435402d8bcf4d8efc969d7b31a47b1c4eebd104b6db10bedbb0cfb515fc3c3  ./example_workflows/OLD - Motion Context - Simple - No Reference Images.json
@@ -32,7 +32,7 @@ c172032391e2f198fd35407c14a732d2fc60d04eeefbb74666989f5399cba134  ./nodes.py
 57f0768acab405a25bcef0d5effe09441223f5b14d648e9f1403c00dbc062d6a  ./README.md
 023c85957c958af2912f8b5e4252211dec798547003855b64538d0fbc261ef6c  ./TECHNICAL_ARCHITECTURE.md
 93ea57e3a3cfb7ab1a03cf1b5775b70ac266412066cae6cf626082d38c928c74  ./tests/run_update2_tests.py
-2ad282843c91e039b242b39e8f3f0f663f3eb0654f191cfb88a617a5bac364b3  ./tests/test_checkpoint_resume_workflow.py
+392193c4c2f929336536ac9015836549fd7576d3887988796d297fffd49e2f70  ./tests/test_checkpoint_resume_workflow.py
 837b2f61ed88394cf6102b0818097263cf99cd8bf5f7e420a55957f467a60ea1  ./tests/test_custom_keyframe_frontend.py
 94965e81e0c156528a083ebda4d5f0adb71d3740ac6e3027faad67fcbf80ccd9  ./tests/test_existing_video_extension_mock.py
 f0b2a4074f7ff1b4e6dffef2ca9c7fb7716cc0faf1c82b8ec506cb9b35584d19  ./tests/test_extension_checkpoint_assembler_mock.py

@@ -18,6 +18,7 @@ def test_checkpoint_resume_workflow_structure():
     assert sum(n["type"] == "MiniMaxH3CheckpointTrigger" for n in nodes) == 1
     final = next(n for n in nodes if n["id"] == 800)
     assert final["type"] == "MiniMaxH3AssembleCheckpoints"
+    assert final["widgets_values"][0] == "h3_checkpoints/clip"
 
 
 def test_checkpoint_resume_workflow_seeds_are_fixed():

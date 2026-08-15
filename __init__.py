@@ -1,8 +1,8 @@
-"""H3 Motion Context — MultiRef + Existing Video Extension.
+"""MiniMax H3 Motion Context / MultiRef / latent-masking custom nodes.
 
-Update 2 keeps all runtime compatibility lazy. Importing the custom node pack
-registers nodes only; ComfyUI core is patched in memory only when a workflow
-actually executes a feature that needs compatibility.
+Importing the node pack registers nodes only. Compatibility behavior remains
+lazy and capability-aware, so native ComfyUI functionality is preferred when
+the installed version already provides the required H3 behavior.
 """
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

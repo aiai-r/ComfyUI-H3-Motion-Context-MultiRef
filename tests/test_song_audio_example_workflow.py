@@ -1,10 +1,10 @@
-"""Static regression for the delivered FL2VA song-latent example workflow."""
+"""Static regression for the single current asset-backed music-video workflow."""
 
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / "example_workflows" / "H3 FL2VA Song Latent Masking - Reference Images - Music Video.json"
+WORKFLOW = ROOT / "example_workflows" / "NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json"
 ASSETS = ROOT / "example_workflows" / "assets"
 
 
@@ -22,11 +22,10 @@ def _input(node, name):
 
 
 def _origin_by_link(data):
-    # LiteGraph links: [link_id, origin_node_id, origin_slot, target_node_id, target_slot, type]
     return {link[0]: link[1] for link in data.get("links", [])}
 
 
-def test_fl2va_song_latent_example_keeps_images_but_has_no_audio_reference_links():
+def test_current_music_video_keeps_image_refs_and_master_song_out_of_ref_audio():
     data = _load()
 
     unets = _nodes(data, "UNETLoader")
@@ -34,7 +33,7 @@ def test_fl2va_song_latent_example_keeps_images_but_has_no_audio_reference_links
     assert "minimax_h3_fl2va" in unets[0]["widgets_values"][0]
 
     refs = [n for n in _nodes(data, "MiniMaxH3ReferenceToVideo") if n.get("mode", 0) == 0]
-    assert refs
+    assert len(refs) == 6
     for node in refs:
         assert _input(node, "ref_images.ref_image_0")["link"] is not None
         assert _input(node, "ref_images.ref_image_1")["link"] is not None
@@ -43,20 +42,20 @@ def test_fl2va_song_latent_example_keeps_images_but_has_no_audio_reference_links
                 assert inp.get("link") is None
 
     song_nodes = [n for n in _nodes(data, "MiniMaxH3SongMaskedAVContext") if n.get("mode", 0) == 0]
-    assert len(song_nodes) >= 2
+    assert len(song_nodes) == 6
     for node in song_nodes:
         assert _input(node, "master_audio")["link"] is not None
 
     first = next(n for n in song_nodes if "Clip 1" in n.get("title", ""))
     assert _input(first, "source_frames")["link"] is None
-
-    continuations = [n for n in song_nodes if n is not first]
-    for node in continuations:
+    for node in song_nodes:
+        if node is first:
+            continue
         assert _input(node, "source_frames")["link"] is not None
         assert _input(node, "vae")["link"] is not None
 
 
-def test_fl2va_song_latent_example_uses_original_master_audio_for_final_output_and_bundles_assets():
+def test_current_music_video_uses_original_master_audio_for_streamed_final_and_bundles_assets():
     data = _load()
     origins = _origin_by_link(data)
 
@@ -65,15 +64,10 @@ def test_fl2va_song_latent_example_uses_original_master_audio_for_final_output_a
     master_id = load_audio[0]["id"]
     assert load_audio[0]["widgets_values"][0] == "I'll Know You by the Scar.wav"
 
-    finals = [
-        n for n in _nodes(data, "VHS_VideoCombine")
-        if n.get("title") == "FINAL MUSIC VIDEO — ORIGINAL SONG"
-    ]
+    finals = _nodes(data, "MiniMaxH3AssembleCheckpoints")
     assert len(finals) == 1
-    audio_link = _input(finals[0], "audio")["link"]
+    audio_link = _input(finals[0], "master_audio")["link"]
     assert origins[audio_link] == master_id
-    widgets = finals[0]["widgets_values"]
-    assert widgets["trim_to_audio"] is True
 
     expected = [
         "be6f4e89-4c3e-43e0-93f5-cc723ccd9b14.png",
@@ -84,3 +78,8 @@ def test_fl2va_song_latent_example_uses_original_master_audio_for_final_output_a
     for name in expected:
         path = ASSETS / name
         assert path.is_file() and path.stat().st_size > 0
+
+
+def test_only_one_music_video_workflow_is_shipped():
+    files = sorted((ROOT / "example_workflows").glob("*Music Video*.json"))
+    assert [p.name for p in files] == [WORKFLOW.name]

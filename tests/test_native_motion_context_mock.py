@@ -53,16 +53,20 @@ def install_module():
 
     # Sibling modules imported by nodes.py but not exercised here.
     compat = types.ModuleType("nativepkg.h3_compat")
-    compat.ensure_motion_context_compat = lambda: True
+    compat.ensure_motion_context_compat = lambda conditioning=None: True
     sys.modules["nativepkg.h3_compat"] = compat
 
     ext = types.ModuleType("nativepkg.existing_video_extension")
     ext.MiniMaxH3ExistingVideoMaskedContext = type("MiniMaxH3ExistingVideoMaskedContext", (), {})
+    ext.MiniMaxH3GeneratedAVMaskedContext = type("MiniMaxH3GeneratedAVMaskedContext", (), {})
+    ext.MiniMaxH3StartMaskedContext = type("MiniMaxH3StartMaskedContext", (), {})
+    ext.MiniMaxH3StartCheckpointMaskedContext = type("MiniMaxH3StartCheckpointMaskedContext", (), {})
     ext.MiniMaxH3AssembleExtension = type("MiniMaxH3AssembleExtension", (), {})
     sys.modules["nativepkg.existing_video_extension"] = ext
 
     crop = types.ModuleType("nativepkg.h3_auto_crop32")
     crop.MiniMaxH3CropTo32 = type("MiniMaxH3CropTo32", (), {})
+    crop.MiniMaxH3StartCanvasSelector = type("MiniMaxH3StartCanvasSelector", (), {})
     sys.modules["nativepkg.h3_auto_crop32"] = crop
 
     timing = types.ModuleType("nativepkg.h3_timing")

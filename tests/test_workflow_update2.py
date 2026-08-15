@@ -4,11 +4,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WF = ROOT / "example_workflows"
 
-SIMPLE = "Simple Motion Context - No Reference Images.json"
-ADVANCED = "Advanced Motion Context - Reference Images.json"
-MUSIC = "Music Video Motion Context - Song Driven Lipsync + Reference Images.json"
-MP4 = "Advanced Extension of Input Videos.json"
-CUSTOM = "Custom Keyframes Example.json"
+SIMPLE = "OLD - Motion Context - Simple - No Reference Images.json"
+ADVANCED = "OLD - Motion Context - Advanced - Reference Images.json"
+MP4 = "OLD - Hybrid - Input Video Extension + Motion Context - Reference Images.json"
+CUSTOM = "UTILITY - Custom Keyframes Example.json"
 
 
 def _load(name):
@@ -101,38 +100,6 @@ def test_advanced_context_audio_and_crossfade():
         assert audio_in["link"] is not None
         assert links[audio_in["link"]][1] == context_global["id"]
         assert mc["widgets_values"][4] == 39
-
-
-def test_music_video_keeps_motion_context_audio_disabled():
-    wf, nodes, links = _assert_common_continuation_workflow(MUSIC, 14)
-    for mc in _nodes_of(wf, "MiniMaxH3MotionContext"):
-        names = {i["name"] for i in mc.get("inputs", [])}
-        # The song-driven workflow remains visual-only Motion Context.
-        assert "audio_context_length" not in names
-        assert mc["widgets_values"][4] == 0
-
-    # Song timing is automatic: duration = valid_frames / 24 and each
-    # start index = (clip-1) * ((valid_frames-context_frames) / 24).
-    math_nodes = _nodes_of(wf, "ComfyMathExpression")
-    by_title = {n.get("title"): n for n in math_nodes}
-    assert "SONG STEP SECONDS = (frames - context) / 24" in by_title
-    assert "SONG SLICE DURATION = frames / 24" in by_title
-    for clip in range(1, 16):
-        assert f"SONG START — Clip {clip}" in by_title
-
-    slices = []
-    for node in _nodes_of(wf, "TrimAudioDuration"):
-        if str(node.get("title", "")).startswith("SONG SLICE → CLIP "):
-            slices.append(node)
-    assert len(slices) == 15
-    for node in slices:
-        assert _input(node, "start_index")["link"] is not None
-        assert _input(node, "duration")["link"] is not None
-        start_upstream = nodes[links[_input(node, "start_index")["link"]][1]]
-        duration_upstream = nodes[links[_input(node, "duration")["link"]][1]]
-        assert start_upstream["type"] == "ComfyMathExpression"
-        assert start_upstream.get("title", "").startswith("SONG START — Clip ")
-        assert duration_upstream.get("title") == "SONG SLICE DURATION = frames / 24"
 
 
 def test_existing_mp4_workflow_uses_masked_prefix_and_kj_crossfade():

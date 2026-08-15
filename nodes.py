@@ -45,11 +45,29 @@ except ImportError:  # ComfyUI always ships safetensors; belt and braces
 from .h3_compat import ensure_motion_context_compat
 from .existing_video_extension import (
     MiniMaxH3ExistingVideoMaskedContext,
+    MiniMaxH3GeneratedAVMaskedContext,
+    MiniMaxH3StartMaskedContext,
+    MiniMaxH3StartCheckpointMaskedContext,
     MiniMaxH3AssembleExtension,
 )
 from .h3_masked_bridge import MiniMaxH3MaskedAVBridge
 from .h3_song_audio_context import MiniMaxH3SongMaskedAVContext
-from .h3_auto_crop32 import MiniMaxH3CropTo32
+from .h3_checkpoint_resume import (
+    MiniMaxH3CheckpointSave,
+    MiniMaxH3CheckpointSavePath,
+    MiniMaxH3CheckpointLoadPath,
+    MiniMaxH3CheckpointTailFrames,
+    MiniMaxH3ResumeCheckpointLatent,
+    MiniMaxH3CheckpointLoad,
+    MiniMaxH3ResumeTailFrames,
+    MiniMaxH3ResumeOrLiveLatent,
+    MiniMaxH3CheckpointTrigger,
+    MiniMaxH3AssembleCheckpoints,
+    MiniMaxH3AssembleExtensionCheckpoints,
+    MiniMaxH3AssembleStarterOrExtensionCheckpoints,
+    MiniMaxH3PreviewCheckpointVideo,
+)
+from .h3_auto_crop32 import MiniMaxH3CropTo32, MiniMaxH3StartCanvasSelector
 from .h3_timing import crossfade_plan
 
 try:
@@ -71,9 +89,9 @@ AUDIO_HZ = 40.0
 # 39/90/141/... also land exactly on H3's 40 Hz audio clock.
 
 
-def _ensure_h3_native_guide_support():
-    """Verify native #15439 guide/MultiRef support; never patch H3 core."""
-    ensure_motion_context_compat()
+def _ensure_h3_native_guide_support(conditioning=None):
+    """Verify the native #15439 features this conditioning actually needs."""
+    ensure_motion_context_compat(conditioning)
 
 
 def _pixel_frames(latent_t):
@@ -273,7 +291,7 @@ class MiniMaxH3MotionContext:
               encode_mode, anchor_mode, crop, audio_context_length=0,
               audio_mode="timeline", context_latent=None, audio_vae=None,
               context_audio=None):
-        _ensure_h3_native_guide_support()
+        _ensure_h3_native_guide_support(conditioning)
 
         if anchor_mode != "head":
             raise ValueError(
@@ -846,7 +864,7 @@ class MiniMaxH3CustomKeyframes:
         crop="disabled",
         **kwargs,
     ):
-        _ensure_h3_native_guide_support()
+        _ensure_h3_native_guide_support(conditioning)
 
         try:
             state = json.loads(keyframe_state or "{}")
@@ -972,6 +990,112 @@ class MiniMaxH3CustomKeyframes:
         return (out,)
 
 
+class MiniMaxH3ExtensionStartMode:
+    """Single workflow switch for the masked AV extension chain start source."""
+
+    START_T2V_I2V = "start with T2V/I2V"
+    START_EXISTING_VIDEO = "Start from existing video"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": ([cls.START_T2V_I2V, cls.START_EXISTING_VIDEO], {
+                    "default": cls.START_EXISTING_VIDEO,
+                    "tooltip": "Choose once: generate a T2V/I2V starter, or extend an existing video. The workflow source-video group follows this choice automatically."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("start_mode",)
+    FUNCTION = "select"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "One global switch for the masked AV extension workflow. The user-facing "
+        "choice is mapped to the internal load_video/generate_starter mode used "
+        "by the H3 context, canvas, and checkpoint assembler nodes."
+    )
+
+    def select(self, mode=START_EXISTING_VIDEO):
+        if str(mode) == self.START_T2V_I2V:
+            return ("generate_starter",)
+        return ("load_video",)
+
+
+class MiniMaxH3OptionalStartFrame:
+    """Optional first-frame switch for the generated starter clip."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enabled": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Off = T2V starter. On = use the connected image as the I2V first frame."
+                }),
+            },
+            "optional": {
+                "image": ("IMAGE", {
+                    "lazy": True,
+                    "tooltip": "Connect Load Image here for I2V. The branch is not evaluated while disabled."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("first_frame",)
+    FUNCTION = "select"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = "Optional starter first frame: disabled gives T2V, enabled gives I2V."
+
+    def check_lazy_status(self, enabled, image=None):
+        if bool(enabled) and image is None:
+            return ["image"]
+        return []
+
+    def select(self, enabled=False, image=None):
+        return (image if bool(enabled) else None,)
+
+
+class MiniMaxH3OptionalReferenceImage:
+    """Global optional Ref2VA image switch for example workflows."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enabled": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When off, returns None and does not evaluate the optional image branch. MiniMaxH3ReferenceToVideo ignores None reference entries."
+                }),
+            },
+            "optional": {
+                "image": ("IMAGE", {
+                    "lazy": True,
+                    "tooltip": "Connect a Load Image node here only when this global reference slot is needed."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("reference_image",)
+    FUNCTION = "select"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Optional global image-reference slot. Disabled slots return None and "
+        "are ignored by native MiniMaxH3ReferenceToVideo."
+    )
+
+    def check_lazy_status(self, enabled, image=None):
+        if bool(enabled) and image is None:
+            return ["image"]
+        return []
+
+    def select(self, enabled=False, image=None):
+        return (image if bool(enabled) else None,)
+
+
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3MotionContext": MiniMaxH3MotionContext,
     "MiniMaxH3MotionContextTrim": MiniMaxH3MotionContextTrim,
@@ -979,10 +1103,30 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3MotionContextLoadLatent": MiniMaxH3MotionContextLoadLatent,
     "MiniMaxH3CustomKeyframes": MiniMaxH3CustomKeyframes,
     "MiniMaxH3ExistingVideoMaskedContext": MiniMaxH3ExistingVideoMaskedContext,
+    "MiniMaxH3GeneratedAVMaskedContext": MiniMaxH3GeneratedAVMaskedContext,
+    "MiniMaxH3StartMaskedContext": MiniMaxH3StartMaskedContext,
+    "MiniMaxH3StartCheckpointMaskedContext": MiniMaxH3StartCheckpointMaskedContext,
     "MiniMaxH3MaskedAVBridge": MiniMaxH3MaskedAVBridge,
     "MiniMaxH3SongMaskedAVContext": MiniMaxH3SongMaskedAVContext,
+    "MiniMaxH3CheckpointSave": MiniMaxH3CheckpointSave,
+    "MiniMaxH3CheckpointSavePath": MiniMaxH3CheckpointSavePath,
+    "MiniMaxH3CheckpointLoadPath": MiniMaxH3CheckpointLoadPath,
+    "MiniMaxH3CheckpointTailFrames": MiniMaxH3CheckpointTailFrames,
+    "MiniMaxH3ResumeCheckpointLatent": MiniMaxH3ResumeCheckpointLatent,
+    "MiniMaxH3CheckpointLoad": MiniMaxH3CheckpointLoad,
+    "MiniMaxH3ResumeTailFrames": MiniMaxH3ResumeTailFrames,
+    "MiniMaxH3ResumeOrLiveLatent": MiniMaxH3ResumeOrLiveLatent,
+    "MiniMaxH3CheckpointTrigger": MiniMaxH3CheckpointTrigger,
+    "MiniMaxH3AssembleCheckpoints": MiniMaxH3AssembleCheckpoints,
+    "MiniMaxH3AssembleExtensionCheckpoints": MiniMaxH3AssembleExtensionCheckpoints,
+    "MiniMaxH3AssembleStarterOrExtensionCheckpoints": MiniMaxH3AssembleStarterOrExtensionCheckpoints,
+    "MiniMaxH3PreviewCheckpointVideo": MiniMaxH3PreviewCheckpointVideo,
     "MiniMaxH3AssembleExtension": MiniMaxH3AssembleExtension,
     "MiniMaxH3CropTo32": MiniMaxH3CropTo32,
+    "MiniMaxH3StartCanvasSelector": MiniMaxH3StartCanvasSelector,
+    "MiniMaxH3OptionalReferenceImage": MiniMaxH3OptionalReferenceImage,
+    "MiniMaxH3ExtensionStartMode": MiniMaxH3ExtensionStartMode,
+    "MiniMaxH3OptionalStartFrame": MiniMaxH3OptionalStartFrame,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContext": "H3 Motion Context",
@@ -991,8 +1135,27 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3MotionContextLoadLatent": "H3 Motion Context Load Latent",
     "MiniMaxH3CustomKeyframes": "H3 Custom Keyframes",
     "MiniMaxH3ExistingVideoMaskedContext": "H3 Existing Video Masked Context",
+    "MiniMaxH3GeneratedAVMaskedContext": "H3 Generated AV Masked Context",
+    "MiniMaxH3StartMaskedContext": "H3 Start Masked Context",
     "MiniMaxH3MaskedAVBridge": "H3 Masked AV Bridge",
     "MiniMaxH3SongMaskedAVContext": "H3 Song Audio + Masked Video Context",
+    "MiniMaxH3CheckpointSave": "H3 Checkpoint Save",
+    "MiniMaxH3CheckpointSavePath": "H3 Persistent Checkpoint Gate",
+    "MiniMaxH3CheckpointLoadPath": "H3 Checkpoint Load Path",
+    "MiniMaxH3CheckpointTailFrames": "H3 Checkpoint Tail Frames",
+    "MiniMaxH3ResumeCheckpointLatent": "H3 Resume / Saved AV Latent",
+    "MiniMaxH3CheckpointLoad": "H3 Checkpoint Load",
+    "MiniMaxH3ResumeTailFrames": "H3 Resume / Live Tail Frames",
+    "MiniMaxH3ResumeOrLiveLatent": "H3 Resume / Live AV Latent",
+    "MiniMaxH3CheckpointTrigger": "H3 Checkpoint Final Trigger",
+    "MiniMaxH3AssembleCheckpoints": "H3 Assemble Checkpoints",
+    "MiniMaxH3AssembleExtensionCheckpoints": "H3 Assemble Extension Checkpoints",
+    "MiniMaxH3AssembleStarterOrExtensionCheckpoints": "H3 Assemble Starter + Extension Checkpoints",
+    "MiniMaxH3PreviewCheckpointVideo": "H3 Preview Checkpoint Video",
     "MiniMaxH3AssembleExtension": "H3 Assemble Existing Video Extension",
     "MiniMaxH3CropTo32": "H3 Crop Source To /32",
+    "MiniMaxH3StartCanvasSelector": "H3 Start Canvas Selector",
+    "MiniMaxH3OptionalReferenceImage": "H3 Optional Reference Image",
+    "MiniMaxH3ExtensionStartMode": "H3 Extension Start Mode",
+    "MiniMaxH3OptionalStartFrame": "H3 Optional Starter First Frame",
 }

@@ -1,6 +1,7 @@
 """MiniMax H3 FL clip prep with exact master-song audio and optional video prefix."""
 
 import logging
+import math
 
 import torch
 
@@ -244,11 +245,19 @@ class MiniMaxH3SongMaskedAVContext:
             raise ValueError("h3_song_audio: batch size 1 only")
 
         target_frames = _pixel_frames(int(target_video.shape[2]))
-        expected_audio_steps = int(round(target_frames / FPS * AUDIO_HZ))
-        if int(target_audio.shape[-1]) != expected_audio_steps:
-            raise RuntimeError(
-                "h3_song_audio: target latent has %d audio steps for %d video frames; expected %d on H3's 40 Hz audio grid"
-                % (int(target_audio.shape[-1]), target_frames, expected_audio_steps)
+        # The target latent is authoritative.  Native ComfyUI allocates the H3
+        # audio stream by rounding the video duration onto the 40 Hz audio grid.
+        # That grid can extend a fraction of one audio token past the final pixel
+        # frame (e.g. 124f @ 24 fps = 206.666... ticks -> 207 target ticks).
+        expected_audio_steps = int(target_audio.shape[-1])
+        calculated_audio_steps = int(round(target_frames / FPS * AUDIO_HZ))
+        if expected_audio_steps != calculated_audio_steps:
+            _LOG.warning(
+                "h3_song_audio: target latent has %d audio steps for %d video frames; "
+                "the nominal 40 Hz calculation gives %d. Using the target latent length.",
+                expected_audio_steps,
+                target_frames,
+                calculated_audio_steps,
             )
 
         width = int(target_video.shape[4]) * 16
@@ -260,26 +269,74 @@ class MiniMaxH3SongMaskedAVContext:
         start_sample = int(round(float(clip_start_seconds) * vae_sr))
         if start_sample < 0:
             raise ValueError("h3_song_audio: clip_start_seconds must be >= 0")
-        want_samples = int(round(target_frames / FPS * vae_sr))
-        end_sample = start_sample + want_samples
-        audio_slice = waveform[..., start_sample:end_sample]
-        audio_slice = _fit_waveform(audio_slice, want_samples, "master audio slice")
+        # Keep clip_audio tied to the exact picture duration, but encode enough
+        # master audio to cover the *rounded H3 audio grid*.  These are not
+        # always the same duration: 124 video frames need 165333 samples at
+        # 32 kHz, while a 207-token H3 audio target spans 165600 samples.
+        picture_samples = int(round(target_frames / FPS * vae_sr))
+        picture_end_sample = start_sample + picture_samples
+        audio_slice = waveform[..., start_sample:picture_end_sample]
+        audio_slice = _fit_waveform(audio_slice, picture_samples, "master audio slice")
 
-        audio_full = audio_vae.encode(audio_slice.movedim(1, -1))
+        grid_samples = int(math.ceil(expected_audio_steps / AUDIO_HZ * vae_sr))
+        encode_samples = max(picture_samples, grid_samples)
+        encode_end_sample = start_sample + encode_samples
+        encode_slice = waveform[..., start_sample:encode_end_sample]
+        encode_slice = _fit_waveform(
+            encode_slice, encode_samples, "master audio latent-grid slice"
+        )
+
+        audio_full = audio_vae.encode(encode_slice.movedim(1, -1))
         if getattr(audio_full, "ndim", 0) != 4:
             raise ValueError(
                 "h3_song_audio: audio VAE returned %s, expected [B,C,2,T]"
                 % (tuple(getattr(audio_full, "shape", ())),)
             )
         got_audio_steps = int(audio_full.shape[-1])
+
+        # Some audio-VAE wrappers quantize their temporal output down at an
+        # encoder boundary.  If the exact grid span is still one/few tokens
+        # short, retry with a small amount of real master-audio lookahead (or
+        # tail silence if the song has ended), then crop back to the target.
+        # This is preferable to fabricating latent tokens by repeating/padding
+        # latent values and preserves the clip_start_seconds alignment.
+        if got_audio_steps < expected_audio_steps:
+            missing = expected_audio_steps - got_audio_steps
+            guard_samples = int(math.ceil((missing + 1) * vae_sr / AUDIO_HZ))
+            retry_samples = encode_samples + guard_samples
+            retry_end_sample = start_sample + retry_samples
+            retry_slice = waveform[..., start_sample:retry_end_sample]
+            retry_slice = _fit_waveform(
+                retry_slice, retry_samples, "master audio latent-grid retry slice"
+            )
+            retry_full = audio_vae.encode(retry_slice.movedim(1, -1))
+            if getattr(retry_full, "ndim", 0) != 4:
+                raise ValueError(
+                    "h3_song_audio: audio VAE retry returned %s, expected [B,C,2,T]"
+                    % (tuple(getattr(retry_full, "shape", ())),)
+                )
+            retry_steps = int(retry_full.shape[-1])
+            _LOG.warning(
+                "h3_song_audio: audio VAE initially produced %d/%d target steps; "
+                "retried with %.2f ms of latent-grid lookahead and got %d",
+                got_audio_steps,
+                expected_audio_steps,
+                guard_samples / vae_sr * 1000.0,
+                retry_steps,
+            )
+            audio_full = retry_full
+            got_audio_steps = retry_steps
+
         if got_audio_steps < expected_audio_steps:
             raise RuntimeError(
-                "h3_song_audio: target clip needs %d audio latent steps but the audio VAE produced only %d"
+                "h3_song_audio: target clip needs %d audio latent steps but the audio VAE "
+                "produced only %d even after latent-grid lookahead"
                 % (expected_audio_steps, got_audio_steps)
             )
         if got_audio_steps > expected_audio_steps:
-            _LOG.warning(
-                "h3_song_audio: audio VAE produced %d steps for a %d-step target; keeping the first %d so the slice stays aligned to clip_start_seconds",
+            _LOG.info(
+                "h3_song_audio: audio VAE produced %d steps for a %d-step target; "
+                "keeping the first %d so the slice stays aligned to clip_start_seconds",
                 got_audio_steps,
                 expected_audio_steps,
                 expected_audio_steps,

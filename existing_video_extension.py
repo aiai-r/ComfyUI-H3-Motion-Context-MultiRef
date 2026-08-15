@@ -437,6 +437,380 @@ class MiniMaxH3ExistingVideoMaskedContext:
         return (out, n)
 
 
+class MiniMaxH3GeneratedAVMaskedContext:
+    """Continue from a previous generated H3 clip directly in latent space.
+
+    Unlike ExistingVideoMaskedContext, this node does not decode and re-encode
+    the previous clip. It copies the previous clip's final valid H3 video/audio
+    latent run into the new target's prefix and protects both streams with
+    per-token mask=0. This is the preferred way to chain generated H3 clips.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {
+                    "tooltip": "Fresh target AV latent from MiniMax H3 Image/Reference to Video."
+                }),
+                "source_latent": ("LATENT", {
+                    "tooltip": "Previous generated H3 sampler/checkpoint latent. Its final AV run is copied directly into the new target prefix."
+                }),
+                "context_length": ("INT", {
+                    "default": 39, "min": 5, "max": 9999,
+                    "tooltip": "Protected AV prefix. Uses H3-valid runs 5/22/39/56/...; 39 recommended because it aligns the 24 fps video and 40 Hz audio clocks exactly."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "INT")
+    RETURN_NAMES = ("latent", "trim_frames")
+    FUNCTION = "prepare"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Chain generated H3 clips without a decode/re-encode round trip. The "
+        "previous clip's final joint video/audio latent run is copied into the "
+        "new target prefix and protected with AV noise-mask 0; only the future "
+        "region denoises."
+    )
+
+    def prepare(self, latent, source_latent, context_length=39):
+        _require_h3_mask_support()
+        target_video, target_audio = _streams_from_latent(latent)
+        source_video, source_audio = _streams_from_latent(source_latent)
+
+        if int(target_video.shape[0]) != 1 or int(target_audio.shape[0]) != 1:
+            raise ValueError(
+                "h3_masked_extension: generated-latent continuation currently supports target batch size 1"
+            )
+        if int(source_video.shape[0]) != 1 or int(source_audio.shape[0]) != 1:
+            raise ValueError(
+                "h3_masked_extension: generated-latent continuation currently supports source batch size 1"
+            )
+
+        target_frames = _pixel_frames(int(target_video.shape[2]))
+        source_frames = _pixel_frames(int(source_video.shape[2]))
+        n = _snap_context_length(context_length, source_frames, target_frames)
+
+        # H3-valid pixel runs 5/22/39/... map to temporal latent runs
+        # 2/7/12/... . Both full H3 clips and valid context runs are 2 mod 5
+        # latent steps, so the source tail starts at the same temporal phase as
+        # the target prefix. Direct slicing is therefore phase-aligned.
+        video_steps = 2 + 5 * ((n - 5) // 17)
+        if _pixel_frames(video_steps) != n:
+            raise RuntimeError(
+                "h3_masked_extension: internal H3 context mapping failed for %d frames" % n
+            )
+        audio_steps = int(round(n / FPS * AUDIO_HZ))
+
+        if video_steps >= int(target_video.shape[2]):
+            raise ValueError(
+                "h3_masked_extension: video context consumes the whole target latent"
+            )
+        if audio_steps >= int(target_audio.shape[-1]):
+            raise ValueError(
+                "h3_masked_extension: audio context consumes the whole target latent"
+            )
+        if int(source_video.shape[2]) < video_steps:
+            raise ValueError(
+                "h3_masked_extension: source latent has too few video steps for the requested context"
+            )
+        if int(source_audio.shape[-1]) < audio_steps:
+            raise ValueError(
+                "h3_masked_extension: source latent has too few audio steps for the requested context"
+            )
+
+        if tuple(source_video.shape[1:2] + source_video.shape[3:]) != tuple(
+            target_video.shape[1:2] + target_video.shape[3:]
+        ):
+            raise ValueError(
+                "h3_masked_extension: source/target video latent geometry differs: %s vs %s. "
+                "Keep chained clips at the same H3 resolution."
+                % (tuple(source_video.shape), tuple(target_video.shape))
+            )
+        if tuple(source_audio.shape[1:3]) != tuple(target_audio.shape[1:3]):
+            raise ValueError(
+                "h3_masked_extension: source/target audio latent geometry differs: %s vs %s"
+                % (tuple(source_audio.shape), tuple(target_audio.shape))
+            )
+
+        out_video = target_video.clone()
+        out_audio = target_audio.clone()
+        out_video[:, :, :video_steps] = source_video[:, :, -video_steps:].to(
+            device=out_video.device, dtype=out_video.dtype
+        )
+        out_audio[..., :audio_steps] = source_audio[..., -audio_steps:].to(
+            device=out_audio.device, dtype=out_audio.dtype
+        )
+
+        video_mask = torch.ones(
+            (1, 1, int(out_video.shape[2]), int(out_video.shape[3]), int(out_video.shape[4])),
+            device=out_video.device, dtype=torch.float32,
+        )
+        audio_mask = torch.ones(
+            (1, 1, int(out_audio.shape[2]), int(out_audio.shape[3])),
+            device=out_audio.device, dtype=torch.float32,
+        )
+        video_mask[:, :, :video_steps] = 0.0
+        audio_mask[..., :audio_steps] = 0.0
+
+        out = latent.copy()
+        out["samples"] = comfy.nested_tensor.NestedTensor((out_video, out_audio))
+        out["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+
+        _LOG.info(
+            "h3_masked_extension: latent->latent AV continuation protected %d frames = %d video steps / %d audio steps; target %d frames",
+            n, video_steps, audio_steps, target_frames,
+        )
+        return (out, n)
+
+
+class MiniMaxH3StartMaskedContext:
+    """Prepare the first extension context from either a real video or a generated starter clip.
+
+    start_mode=load_video uses the uploaded/decoded source video path.
+    start_mode=generate_starter uses a sampled H3 starter clip (t2v or i2v) and
+    copies its final AV latent tail directly into the new target. When
+    resume_from_extension == 1, the live starter sampler branch is skipped and
+    the saved starter checkpoint is loaded from disk instead.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {
+                    "tooltip": "Fresh target AV latent for Extension 1."
+                }),
+                "vae": ("VAE", {
+                    "tooltip": "MiniMax H3 video VAE. Used only for load_video mode."
+                }),
+                "audio_vae": ("VAE", {
+                    "tooltip": "MiniMax H3 audio VAE. Used only for load_video mode."
+                }),
+                "start_mode": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "Connect H3 Extension Start Mode. load_video = extend an uploaded source video; generate_starter = first sample a t2v/i2v starter clip, then extend it."
+                }),
+                "context_length": ("INT", {
+                    "default": 39, "min": 5, "max": 9999,
+                    "tooltip": "Protected AV prefix. Uses H3-valid runs 5/22/39/56/...; 39 recommended because it aligns the 24 fps video and 40 Hz audio clocks exactly."
+                }),
+                "resume_from_extension": ("INT", {
+                    "default": 0, "min": 0, "max": 9999,
+                    "tooltip": "When start_mode = generate_starter, set 1 to resume Extension 1 from the saved starter checkpoint instead of regenerating the starter clip."
+                }),
+                "starter_checkpoint_path": ("STRING", {
+                    "default": "h3_extension_checkpoints/starter",
+                    "tooltip": "Checkpoint path/prefix for the generated starter clip. Used only in generate_starter mode."
+                }),
+                "source_fps": ("FLOAT", {
+                    "default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001,
+                    "tooltip": "Source-frame FPS. Used only in load_video mode."
+                }),
+                "crop": (["disabled", "center"], {"default": "disabled"}),
+            },
+            "optional": {
+                "source_frames": ("IMAGE", {
+                    "lazy": True,
+                    "tooltip": "Decoded source-video frames. Requested only in load_video mode."
+                }),
+                "source_audio": ("AUDIO", {
+                    "lazy": True,
+                    "tooltip": "Source-video audio. Requested only in load_video mode."
+                }),
+                "live_starter_latent": ("LATENT", {
+                    "lazy": True,
+                    "tooltip": "Live sampled starter H3 AV latent. Requested only in generate_starter mode when not resuming Extension 1."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "INT")
+    RETURN_NAMES = ("latent", "trim_frames")
+    FUNCTION = "prepare"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Prepare Extension 1 for a multi-clip masked AV chain. Either use the "
+        "uploaded source video as the preserved prefix, or use a sampled H3 "
+        "starter clip (t2v/i2v) and continue from its final latent tail."
+    )
+
+    @classmethod
+    def IS_CHANGED(
+        cls, start_mode="load_video", resume_from_extension=0,
+        starter_checkpoint_path="h3_extension_checkpoints/starter", **kwargs
+    ):
+        # Live source-video / live-starter operation should use normal ComfyUI
+        # dependency caching. Only explicit Extension-1 resume reads a fixed
+        # checkpoint slot that may be replaced between queues.
+        if str(start_mode) == "generate_starter" and int(resume_from_extension) == 1:
+            from .h3_checkpoint_resume import _checkpoint_disk_token
+            return _checkpoint_disk_token(starter_checkpoint_path, 1)
+        return "live-start:%s" % str(start_mode)
+
+    def check_lazy_status(
+        self, latent, vae, audio_vae, start_mode, context_length,
+        resume_from_extension, starter_checkpoint_path, source_fps, crop,
+        source_frames=None, source_audio=None, live_starter_latent=None,
+    ):
+        if str(start_mode) == "load_video":
+            needed = []
+            if source_frames is None:
+                needed.append("source_frames")
+            if source_audio is None:
+                needed.append("source_audio")
+            return needed
+
+        if int(resume_from_extension) == 1:
+            return []
+        if live_starter_latent is None:
+            return ["live_starter_latent"]
+        return []
+
+    def prepare(
+        self, latent, vae, audio_vae, start_mode="load_video", context_length=39,
+        resume_from_extension=0, starter_checkpoint_path="h3_extension_checkpoints/starter",
+        source_fps=24.0, crop="disabled", source_frames=None, source_audio=None,
+        live_starter_latent=None,
+    ):
+        mode = str(start_mode)
+        if mode == "load_video":
+            if source_frames is None or source_audio is None:
+                missing = []
+                if source_frames is None:
+                    missing.append("source_frames")
+                if source_audio is None:
+                    missing.append("source_audio")
+                raise ValueError(
+                    "h3_masked_extension: load_video mode needs %s" % ", ".join(missing)
+                )
+            return MiniMaxH3ExistingVideoMaskedContext().prepare(
+                latent, vae, audio_vae, source_frames, source_audio, source_fps,
+                context_length, crop,
+            )
+
+        if int(resume_from_extension) == 1:
+            from .h3_checkpoint_resume import _load_checkpoint, _resolve_checkpoint_path
+            ckpt = _resolve_checkpoint_path(starter_checkpoint_path, 1)
+            video, audio = _load_checkpoint(ckpt)
+            starter = {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+            _LOG.info(
+                "h3_masked_extension: Extension 1 resumes from saved starter checkpoint %s",
+                ckpt,
+            )
+        else:
+            if live_starter_latent is None:
+                raise ValueError(
+                    "h3_masked_extension: generate_starter mode needs live_starter_latent unless resume_from_extension = 1"
+                )
+            starter = live_starter_latent
+
+        return MiniMaxH3GeneratedAVMaskedContext().prepare(
+            latent, starter, context_length
+        )
+
+
+class MiniMaxH3StartCheckpointMaskedContext:
+    """Disk-backed Extension-1 start selector.
+
+    load_video behaves like MiniMaxH3StartMaskedContext. generate_starter waits
+    only for the starter checkpoint path and reloads that saved joint AV latent,
+    so ComfyUI never has to retain the full starter latent just to preserve the
+    dependency between queues.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "vae": ("VAE",),
+                "audio_vae": ("VAE",),
+                "start_mode": ("STRING", {"forceInput": True}),
+                "context_length": ("INT", {"default": 39, "min": 5, "max": 9999}),
+                "resume_from_extension": ("INT", {"default": 0, "min": 0, "max": 9999}),
+                "starter_checkpoint_path": ("STRING", {"default": "h3_extension_checkpoints/starter"}),
+                "source_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001}),
+                "crop": (["disabled", "center"], {"default": "disabled"}),
+            },
+            "optional": {
+                "source_frames": ("IMAGE", {"lazy": True}),
+                "source_audio": ("AUDIO", {"lazy": True}),
+                "starter_checkpoint_signal": ("STRING", {
+                    "lazy": True, "forceInput": True,
+                    "tooltip": "Exact path from the generated starter H3 Checkpoint Save Path node."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "INT")
+    RETURN_NAMES = ("latent", "trim_frames")
+    FUNCTION = "prepare"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Prepare Extension 1 from source video or a disk-backed generated starter checkpoint."
+    )
+
+    @classmethod
+    def IS_CHANGED(cls, start_mode="load_video", resume_from_extension=0, starter_checkpoint_path="h3_extension_checkpoints/starter", **kwargs):
+        if str(start_mode) == "generate_starter" and int(resume_from_extension) == 1:
+            from .h3_checkpoint_resume import _checkpoint_disk_token
+            return _checkpoint_disk_token(starter_checkpoint_path, 1)
+        return "disk-start:%s" % str(start_mode)
+
+    def check_lazy_status(
+        self, latent, vae, audio_vae, start_mode, context_length,
+        resume_from_extension, starter_checkpoint_path, source_fps, crop,
+        source_frames=None, source_audio=None, starter_checkpoint_signal=None,
+    ):
+        if str(start_mode) == "load_video":
+            needed = []
+            if source_frames is None:
+                needed.append("source_frames")
+            if source_audio is None:
+                needed.append("source_audio")
+            return needed
+        if int(resume_from_extension) == 1:
+            return []
+        if starter_checkpoint_signal is None:
+            return ["starter_checkpoint_signal"]
+        return []
+
+    def prepare(
+        self, latent, vae, audio_vae, start_mode="load_video", context_length=39,
+        resume_from_extension=0, starter_checkpoint_path="h3_extension_checkpoints/starter",
+        source_fps=24.0, crop="disabled", source_frames=None, source_audio=None,
+        starter_checkpoint_signal=None,
+    ):
+        mode = str(start_mode)
+        if mode == "load_video":
+            if source_frames is None or source_audio is None:
+                missing = []
+                if source_frames is None:
+                    missing.append("source_frames")
+                if source_audio is None:
+                    missing.append("source_audio")
+                raise ValueError("h3_masked_extension: load_video mode needs %s" % ", ".join(missing))
+            return MiniMaxH3ExistingVideoMaskedContext().prepare(
+                latent, vae, audio_vae, source_frames, source_audio, source_fps, context_length, crop
+            )
+
+        from .h3_checkpoint_resume import _load_checkpoint, _resolve_checkpoint_path
+        if int(resume_from_extension) == 1:
+            ckpt = _resolve_checkpoint_path(starter_checkpoint_path, 1)
+            source = "resume starter checkpoint"
+        else:
+            if not starter_checkpoint_signal:
+                raise ValueError("h3_masked_extension: generate_starter mode needs starter_checkpoint_signal")
+            ckpt = _resolve_checkpoint_path(str(starter_checkpoint_signal), 1)
+            source = "saved starter checkpoint"
+        video, audio = _load_checkpoint(ckpt)
+        starter = {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+        _LOG.info("h3_masked_extension: Extension 1 continues from %s %s", source, ckpt)
+        return MiniMaxH3GeneratedAVMaskedContext().prepare(latent, starter, context_length)
+
+
 class MiniMaxH3AssembleExtension:
     """Frame/sample-exact assembly for an existing-video continuation."""
 

@@ -149,3 +149,48 @@ def test_master_song_audio_is_fully_preserved_while_only_video_prefix_is_masked(
     assert am.max() == 0 and am.min() == 0
     assert clip_audio["sample_rate"] == 32000
     assert clip_audio["waveform"].shape[-1] == round(141 / 24 * 32000)
+
+
+class FloorAudioVAE:
+    """Simulate an encoder that floors temporal output instead of rounding."""
+    audio_sample_rate = 32000
+
+    def encode(self, x):
+        t = int(x.shape[1] / 32000 * 40)
+        return torch.ones((1, 32, 2, t), dtype=torch.float32) * 0.75
+
+
+def test_master_song_audio_124_frame_rounding_shortfall_is_grid_padded_not_rejected():
+    # Native H3 target allocation: 124 / 24 * 40 = 206.666... -> 207 steps.
+    # A floor-style audio encoder fed only the exact picture duration would make
+    # 206 steps. The node must encode the full rounded audio-grid span instead.
+    video = torch.zeros((1, 24, 37, 2, 4))  # 37 video tokens cover 124 frames
+    audio = torch.zeros((1, 32, 2, 207))
+    latent = {"samples": NestedTensor((video, audio))}
+
+    master_audio = {
+        "waveform": torch.rand((1, 2, 32000 * 10)),
+        "sample_rate": 32000,
+    }
+
+    node = module.MiniMaxH3SongMaskedAVContext()
+    out, n, clip_audio = node.prepare(
+        latent,
+        FloorAudioVAE(),
+        master_audio,
+        clip_start_seconds=1.0,
+        context_length=0,
+        source_fps=24.0,
+        crop="disabled",
+        vae=None,
+        source_frames=None,
+    )
+
+    _, oa = out["samples"].unbind()
+    _, am = out["noise_mask"].unbind()
+    assert n == 0
+    assert oa.shape[-1] == 207
+    assert torch.allclose(oa, torch.full_like(oa, 0.75))
+    assert am.max() == 0 and am.min() == 0
+    # clip_audio remains exactly picture-duration audio, not the grid lookahead.
+    assert clip_audio["waveform"].shape[-1] == round(124 / 24 * 32000)

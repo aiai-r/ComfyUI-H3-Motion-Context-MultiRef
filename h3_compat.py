@@ -8,7 +8,6 @@ support when the live ComfyUI build does not provide that support natively.
 
 from __future__ import annotations
 
-import inspect
 import logging
 
 import torch
@@ -78,38 +77,106 @@ def native_guide_status():
     fn = getattr(cls, "extra_conds", None) if cls is not None else None
     if fn is not None:
         try:
-            src = " ".join(inspect.getsource(fn).split())
-        except (OSError, TypeError):
-            src = ""
-        out["native_keyframe_ref_merge"] = (
-            'payload.get("cond_video_latents", []) +' in src
-            or "payload.get('cond_video_latents', []) +" in src
-        )
-        out["native_keyframe_ref_audio_merge"] = (
-            'payload.get("cond_audio_latents", []) +' in src
-            or "payload.get('cond_audio_latents', []) +" in src
-        )
+            # Probe the live method behavior instead of grepping its source.
+            # Packaged Comfy builds, decorators, wrappers, monkey-patches and
+            # harmless upstream refactors can all make inspect.getsource()
+            # unavailable or textually different while preserving the exact
+            # required semantics.
+            probe = cls.__new__(cls)
+            # BaseModel.extra_conds() only needs these attributes when called
+            # without cross-attention/noise inputs.  Avoid running the very
+            # heavyweight H3 model constructor just for a capability check.
+            probe.concat_keys = ()
+            probe.latent_shapes = None
+
+            kf_v = torch.zeros((1, 24, 1, 2, 2))
+            ref_v = torch.ones((1, 24, 1, 2, 2))
+            kf_a = torch.zeros((1, 32, 2, 2))
+            ref_a = torch.ones((1, 32, 2, 2))
+            keyframes = [{"resolved_frame_index": 0,
+                          "latent": kf_v, "audio_latent": kf_a}]
+            refs = [
+                {"kind": "image", "latent_h": 2, "latent_w": 2,
+                 "latent": ref_v},
+                {"kind": "audio", "ref_audio_t": 2,
+                 "audio_latent": ref_a},
+            ]
+            result = fn(probe, minimax_keyframes=keyframes, minimax_refs=refs)
+            wrapped = result.get("minimax_payload") if isinstance(result, dict) else None
+            payload = getattr(wrapped, "cond", wrapped)
+            if isinstance(payload, dict):
+                videos = payload.get("cond_video_latents", [])
+                audios = payload.get("cond_audio_latents", [])
+                out["native_keyframe_ref_merge"] = (
+                    len(videos) == 2 and videos[0] is kf_v and videos[1] is ref_v
+                )
+                out["native_keyframe_ref_audio_merge"] = (
+                    len(audios) == 2 and audios[0] is kf_a and audios[1] is ref_a
+                )
+        except Exception as exc:
+            out["extra_conds_probe_error"] = repr(exc)
     return out
 
 
-def ensure_motion_context_compat():
-    """Require native #15439 guide support; never patch H3 core."""
+def _conditioning_ref_requirements(conditioning):
+    """Return which #15439 ref/keyframe merge paths this conditioning uses.
+
+    Classic Motion Context without Ref2VA references does not need either
+    merge capability.  Image/video references need the video-latent merge;
+    standalone/reference-video audio needs the audio-latent merge as well.
+    """
+    need_video = False
+    need_audio = False
+    for item in conditioning or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        meta = item[1]
+        if not isinstance(meta, dict):
+            continue
+        for ref in meta.get("minimax_refs", []) or []:
+            if not isinstance(ref, dict):
+                continue
+            if ref.get("latent") is not None:
+                need_video = True
+            if ref.get("audio_latent") is not None:
+                need_audio = True
+    return need_video, need_audio
+
+
+def ensure_motion_context_compat(conditioning=None):
+    """Require only the native #15439 features the current graph actually uses.
+
+    The guide/layout capabilities are always required. Ref2VA merge support is
+    conditional: Simple Motion Context has no refs and should not be rejected
+    because an unrelated ref-merge probe fails, while Advanced/MultiRef paths
+    still fail loudly if the merge they need is genuinely unavailable.
+    """
     status = native_guide_status()
-    required = (
-        status.get("ref_aware_arbitrary_guides"),
-        status.get("guide_audio_segment"),
-        status.get("native_keyframe_ref_merge"),
-        status.get("native_keyframe_ref_audio_merge"),
-    )
-    if not all(required):
+    need_video_ref_merge, need_audio_ref_merge = _conditioning_ref_requirements(conditioning)
+
+    missing = []
+    if not status.get("ref_aware_arbitrary_guides"):
+        missing.append("ref_aware_arbitrary_guides")
+    if not status.get("guide_audio_segment"):
+        missing.append("guide_audio_segment")
+    if need_video_ref_merge and not status.get("native_keyframe_ref_merge"):
+        missing.append("native_keyframe_ref_merge")
+    if need_audio_ref_merge and not status.get("native_keyframe_ref_audio_merge"):
+        missing.append("native_keyframe_ref_audio_merge")
+
+    if missing:
         raise RuntimeError(
-            "h3_motion_context: this build requires the native MiniMax H3 "
-            "guide/MultiRef support from ComfyUI PR #15439. Capability report: %r"
-            % status
+            "h3_motion_context: this graph requires native MiniMax H3 guide/"
+            "MultiRef support from ComfyUI PR #15439, but the live runtime is "
+            "missing %s. Ref merge requirements for this conditioning: "
+            "video=%s, audio=%s. Capability report: %r"
+            % (", ".join(missing), need_video_ref_merge,
+               need_audio_ref_merge, status)
         )
     _log_once(
         "native_15439",
-        "h3_motion_context: native ComfyUI H3 guide + MultiRef core detected; "
+        "h3_motion_context: native ComfyUI H3 guide core detected; "
+        "required Ref2VA merge paths verified for this conditioning; "
         "no Motion Context core patch installed",
     )
     return True

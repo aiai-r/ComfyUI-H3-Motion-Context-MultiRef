@@ -161,3 +161,57 @@ def test_39_frame_prefix_and_exact_assembly():
     )
     assert images.shape[0] == 222
     assert joined_audio["waveform"].shape[-1] == round(222 / 24 * 32000)
+
+
+def test_generated_latent_av_context_copies_tail_without_reencode():
+    # 141 H3 frames -> 42 video steps / 235 audio steps.
+    src_video = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).repeat(1, 24, 1, 2, 4)
+    src_audio = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).repeat(1, 32, 2, 1)
+    source = {"samples": NestedTensor((src_video, src_audio))}
+
+    dst_video = torch.zeros((1, 24, 42, 2, 4))
+    dst_audio = torch.zeros((1, 32, 2, 235))
+    target = {"samples": NestedTensor((dst_video, dst_audio))}
+
+    node = module.MiniMaxH3GeneratedAVMaskedContext()
+    out, n = node.prepare(target, source, 39)
+    assert n == 39
+    ov, oa = out["samples"].unbind()
+    vm, am = out["noise_mask"].unbind()
+
+    # 39 frames = 12 H3 video latent steps = 65 H3 audio latent steps.
+    assert torch.equal(ov[:, :, :12], src_video[:, :, -12:])
+    assert torch.equal(oa[..., :65], src_audio[..., -65:])
+    assert torch.count_nonzero(ov[:, :, 12:]) == 0
+    assert torch.count_nonzero(oa[..., 65:]) == 0
+    assert vm[:, :, :12].max() == 0 and vm[:, :, 12:].min() == 1
+    assert am[..., :65].max() == 0 and am[..., 65:].min() == 1
+
+
+def test_start_masked_context_lazy_start_modes_and_live_starter():
+    node = module.MiniMaxH3StartMaskedContext()
+    assert node.check_lazy_status(
+        None, None, None, 'load_video', 39, 0, 'starter', 24.0, 'disabled'
+    ) == ['source_frames', 'source_audio']
+    assert node.check_lazy_status(
+        None, None, None, 'generate_starter', 39, 0, 'starter', 24.0, 'disabled'
+    ) == ['live_starter_latent']
+    assert node.check_lazy_status(
+        None, None, None, 'generate_starter', 39, 1, 'starter', 24.0, 'disabled'
+    ) == []
+
+    src_video = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).repeat(1, 24, 1, 2, 4)
+    src_audio = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).repeat(1, 32, 2, 1)
+    starter = {'samples': NestedTensor((src_video, src_audio))}
+    dst_video = torch.zeros((1, 24, 42, 2, 4))
+    dst_audio = torch.zeros((1, 32, 2, 235))
+    target = {'samples': NestedTensor((dst_video, dst_audio))}
+
+    out, n = node.prepare(
+        target, None, None, 'generate_starter', 39, 0, 'starter', 24.0,
+        'disabled', live_starter_latent=starter,
+    )
+    ov, oa = out['samples'].unbind()
+    assert n == 39
+    assert torch.equal(ov[:, :, :12], src_video[:, :, -12:])
+    assert torch.equal(oa[..., :65], src_audio[..., -65:])

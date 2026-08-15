@@ -1,250 +1,161 @@
-# H3 Motion Context — MultiRef with per-token noise masking on audio and video latents and custom keyframes
+# ComfyUI H3 Motion Context — MultiRef & Latent Masking
 
-## 🎬 FL2VA Latent Audio Masking Song Demo
-https://github.com/user-attachments/assets/33e22c59-d23f-4470-b52a-6fabb0e4a66b
-**Full 72-second generated example.** FL2VA uses two image references while the
-original master song is encoded directly into H3's audio latent and protected
-with an audio denoise mask of `0`. No `ref_audio_*` input is connected.
+A ComfyUI custom-node pack and workflow collection for making **longer MiniMax H3 videos from multiple generations** while keeping motion, identity, audio continuity, or an exact master-song timeline consistent across clip boundaries.
 
-The complete reproducible workflow, reference images, song, and lyrics are
-included in [`example_workflows/`](example_workflows/).
+For new projects, start with the workflows whose names begin with **`NEW - Latent Masking`**. The older **`OLD - Motion Context`** workflows are retained for existing projects and experimentation.
 
-> **Modified fork.** Original project by [NikoDemon80](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context), licensed GPL-3.0.
+> Modified fork of [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context), GPL-3.0.
 
-This fork originally focused on making H3 Motion Context work cleanly alongside Ref2VA/MultiRef, including timeline-audio context without replacing ordinary references.
+## Which workflow should I use?
 
+| I want to… | Use this workflow |
+|---|---|
+| Make a long music video synced to one exact song | **NEW - Latent Masking - Music Video - Lip-Sync + Reference images** |
+| Extend an uploaded video through several H3 generations | **NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images** |
+| Generate a new T2V or I2V starter clip and then keep extending it | **NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images** |
+| Learn the simplest masked existing-video extension | **NEW - Latent Masking - AV Extension - Minimal Single Clip** |
+| Generate a transition between two existing videos | **NEW - Latent Masking - AV Bridge - Two Videos** |
+| Use the older guide-based continuation method without references | **OLD - Motion Context - Simple - No Reference Images** |
+| Use the older guide-based continuation method with Ref2VA images | **OLD - Motion Context - Advanced - Reference Images** |
+| Place custom still-image anchors on the H3 timeline | **UTILITY - Custom Keyframes Example** |
 
-## Acknowledgements
+See [example_workflows/README.md](example_workflows/README.md) for the single workflow chooser and detailed guide for every included workflow.
 
-The MiniMax H3 video/audio latent masking work in this fork builds on **ComfyUI PR [#15375 — Support per-token video and audio latent noise masks on MiniMax-H3](https://github.com/Comfy-Org/ComfyUI/pull/15375)**, authored by **[Barish Ozbay (`drozbay`)](https://github.com/drozbay)**. That PR introduced the H3-aware per-token video/audio denoise-mask approach that this repo adapts and rebases for its masked existing-video extension and masked AV bridge workflows. Credit for the original H3 AV mask design and upstream implementation belongs to Barish Ozbay.
+## Recommended starting points
 
-## Update 4 — FL2VA Exact Song-Latent Masking
+### Music video
 
-- Added **H3 Song Audio + Masked Video Context** (`MiniMaxH3SongMaskedAVContext`) for song-driven FL2VA generation.
-- The node slices the original master audio on the project timeline, VAE-encodes that exact interval into H3's target audio latent, and sets the full audio denoise mask to `0` so the sampler changes only the video stream.
-- Continuation clips can independently preserve a previous decoded video tail at the head of the target latent while leaving the rest of the video stream denoisable.
-- Reference images remain available through `MiniMaxH3ReferenceToVideo`; the song does **not** need to occupy a `ref_audio_*` socket.
-- Added a reproducible FL2VA music-video example with two image references, the master-song asset, linear visual overlap, and the untouched master song attached to the final render.
-- Added static workflow coverage that verifies the FL2VA checkpoint, disconnected audio-reference sockets, song-latent nodes, reference-image wiring, final master-audio output, and included assets.
+Use **`NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json`**.
 
-See [UPDATE_4_2026-08-14.md](UPDATE_4_2026-08-14.md) and [the reproducible example notes](example_workflows/H3%20FL2VA%20Song%20Latent%20Masking%20-%20README.md).
+It supports:
 
-## Update 3 — Per-Token Noise Masking on Video and Audio Latents
+- up to 20 sequential H3 clips;
+- reference images for performer identity/appearance;
+- the original master song as the exact H3 audio timeline;
+- per-clip checkpoints and clip-boundary resume;
+- temporary per-clip VHS previews with a global preview bypass;
+- RAM-safe sequential final assembly with direct full-MP4 preview;
+- linear visual blending at every clip seam;
+- the untouched original song as the final soundtrack.
 
-- Added **H3 Masked AV Bridge**, a two-ended MiniMax H3 target-latent bridge built on the repo's PR #15375-style AV denoise-mask compatibility.
-- Added a tested **one-video masked extension** example: 39 preserved AV frames + 153 generated frames in a 192-frame target, with frame/sample-exact audio trimming/assembly and separate VHS raw-H3 + stitched outputs.
-- Added a tested **two-video masked bridge** example: 39 preserved AV frames + 114 generated middle frames + 39 preserved AV frames.
-- Update 3 targets the post-#15439 native H3 guide architecture: normal Motion Context uses native `minimax_keyframes` / `cond_audio`; the #15375 compatibility layer is only used for masked target-latent operations when native equivalent support is absent.
-- Endpoint source frames are written into the actual H3 target latent and protected with `0 = preserve`, `1 = generate`; the examples do not use AddGuide for those endpoint windows.
-- Added bridge and example-workflow regression checks.
+### General video extension
 
-See [UPDATE_3_2026-08-14.md](UPDATE_3_2026-08-14.md) and [H3_MASKED_AV_BRIDGE.md](H3_MASKED_AV_BRIDGE.md).
+Use **`NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images.json`**.
 
-## Update 2 — 2026-08-11
+One switch chooses how the chain begins:
 
-- **Existing video extension** — seamlessly extend an already existing input video by preserving its final video/audio context and generating the continuation from that point.
-- **Smoother seams by default** — the continuation workflows use KJNodes **Image Batch Extend With Overlap** with `linear_blend` to make small reconstruction differences at clip joins less visible.
-- Added a more **capability-aware runtime patching architecture** that only activates the H3 compatibility behavior ComfyUI is actually missing, while avoiding unnecessary or conflicting patches when equivalent native support is already present.
+- **Load video** — start from an uploaded video and continue it.
+- **Generate starter** — first generate a new H3 clip, then continue it. Leave the optional starter image off for **T2V**, or enable it for **I2V**.
 
-## Update 1 — 2026-08-10
+Optional Ref2VA images can be used across the extension clips. The workflow opens with **only Extension 1 active**. Use the rgthree **OPTIONAL EXTENSIONS 2–6 — ENABLE SEQUENTIALLY** switch to enable later groups, and set **GLOBAL ACTIVE EXTENSION COUNT** to the highest enabled extension number.
 
-Update 1 introduced **H3 Custom Keyframes**, allowing still-image conditioning anchors at arbitrary positions in the H3 timeline.
+The generated starter and every extension clip are saved as H3 AV latent checkpoints. Later clips continue from the previous latent tail directly, and the final movie is assembled one checkpoint at a time. This avoids the cumulative decoded-image workflow pattern that can consume very large amounts of RAM.
 
-See [MODIFICATIONS.md](MODIFICATIONS.md) for more information about the fork history and each update.
+In **Load video** mode, the uploaded source is still decoded by the video loader, so an unusually long/high-resolution source can use RAM proportional to that source file. That source-memory cost does not multiply with the number of generated extensions.
 
-## Install
+## Basic terminology
 
-Clone into your ComfyUI `custom_nodes` directory:
+**Reference image** — tells H3 who or what something should look like.
+
+**Protected context** — already-existing video/audio at a continuation boundary that should not be regenerated.
+
+**Latent masking** — protects known H3 video/audio latent regions while H3 denoises only the new region.
+
+**Motion Context** — the older continuation method that supplies previous motion/audio as H3 guide conditioning.
+
+**Master song** — the authoritative song timeline used by the music-video workflow.
+
+**Checkpoint** — a saved H3 video+audio latent for a completed clip, used for resume and low-memory assembly.
+
+## Current vs legacy workflows
+
+### Current — Latent Masking
+
+Recommended for new projects. These workflows can preserve known video/audio directly inside H3's target latent and are the main focus of current development.
+
+The long-form workflows also use disk checkpoints and sequential assembly so completed clips do not need to accumulate as one giant decoded `IMAGE` tensor.
+
+### Legacy — Motion Context
+
+Files beginning with **`OLD - Motion Context`** use the earlier guide-based continuation architecture.
+
+`OLD` means **legacy architecture**, not “known broken.” They remain useful for existing projects, comparison, and experimentation.
+
+Technical details are intentionally kept out of this README. See [TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md) if you want to understand the differences internally.
+
+## Installation
+
+Clone the repository into ComfyUI's `custom_nodes` directory:
 
 ```bash
 cd /path/to/ComfyUI/custom_nodes
 git clone https://github.com/seitanism/ComfyUI-H3-Motion-Context-MultiRef.git
 ```
 
-Restart ComfyUI and hard-refresh the browser.
+Then restart ComfyUI and hard-refresh the browser.
 
-## Context length
+A recent ComfyUI installation is recommended. MiniMax H3 model files are not included in this repository.
 
-The updated continuation examples expose one **GLOBAL CONTEXT FRAMES** control and a separate **GLOBAL VIDEO CROSSFADE** control. Both default to `39`.
+### Common workflow dependencies
 
-H3-native temporal video runs through 243 frames are:
+Different example workflows use different third-party nodes. Common ones include:
 
-```text
-5, 22, 39*, 56, 73, 90*, 107, 124, 141*, 158, 175, 192*, 209, 226, 243*
-* exact video+audio boundary
-```
+- **ComfyUI-VideoHelperSuite** — video loading and some exports/previews;
+- **ComfyUI-KJNodes** — used by some legacy workflows and optional attention/utility nodes;
+- **rgthree-comfy** — used by workflows with group bypass/switch controls.
 
-`39` is recommended because at 24 fps it is exactly `1.625 s`, which is exactly `65` H3 audio-latent steps at 40 Hz. `90`, `141`, `192`, `243`, ... have the same exact AV-boundary property with progressively longer context.
+If a workflow opens with missing nodes, install the node pack named by ComfyUI and restart.
 
-Classic Motion Context accepts any positive frame count. Native run lengths are more efficient in `video` encode mode; off-grid lengths automatically use exact per-frame conditioning.
+## Updates
 
-The existing-MP4 masked-prefix node is stricter because its preserved prefix is written directly into the target H3 temporal latent. Off-grid requests therefore snap down to the nearest native full video run.
+The repository currently has four completed public update PRs. This work is **Update 5**.
 
-## Existing MP4 / video extension
+- **Update 1 — 2026-08-10:** Custom H3 keyframes.
+- **Update 2 — 2026-08-12:** Existing-video extension and compatibility/workflow improvements.
+- **Update 3 — 2026-08-14:** Per-token H3 video/audio latent masking and AV bridge workflows.
+- **Update 4 — 2026-08-14:** Exact FL2VA/master-song latent masking for song-driven generation.
+- **Update 5 — 2026-08-15:** Checkpoints/resume, RAM-safe long-form assembly, 20-clip music video, compatibility fixes, refreshed latent-masked extension workflows, T2V/I2V starter mode, and documentation cleanup.
 
-The existing-video path is intended for the **first continuation from an arbitrary decoded video**, where no original H3 sampler latent is available.
+For the detailed history, see **[MODIFICATIONS.md](MODIFICATIONS.md)**.
 
-Recommended defaults:
+For implementation details, see **[TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md)**.
 
-```text
-source FPS:       24 fps
-source size:      crop down to width/height divisible by 32
-context_length:   39 frames
-video crossfade:  39 frames
-final FPS:        24
-```
+## Troubleshooting / reporting an issue
 
-### H3 Crop Source To /32
+Before reporting a problem:
 
-Center-crops a source IMAGE batch down to the nearest width and height divisible by 32 and outputs the cropped frames plus target width/height.
+1. Update ComfyUI.
+2. Update this node pack.
+3. Restart ComfyUI completely.
+4. Confirm the workflow's required models and third-party nodes are installed.
+5. Try the smallest relevant example workflow if possible.
 
-### H3 Existing Video Masked Context
+When opening an issue, please include:
 
-Takes decoded source frames/audio plus a target H3 AV latent. It:
+- the full traceback;
+- your ComfyUI commit (`git rev-parse HEAD` from the ComfyUI folder);
+- `git status --short` from the ComfyUI folder;
+- how you updated ComfyUI;
+- your ComfyUI startup log or custom-node list;
+- the workflow that triggered the error.
 
-1. canonicalizes the source to H3's 24 fps timeline,
-2. selects an exact native H3 prefix length (`5`, `22`, `39`, `56`, ...),
-3. extracts matching video and audio tails,
-4. VAE-encodes them into the beginning of the target H3 AV latent,
-5. creates nested video/audio denoise masks where the known prefix is preserved and only the future is generated.
+## Technical documentation
 
-The node uses native H3 AV-mask support when available. On older ComfyUI builds it lazily installs only the missing #15375-equivalent compatibility pieces.
+For H3 timing, video/audio latent structure, guide conditioning, latent masking, master-song timing, checkpoint/resume behavior, compatibility layers, and streamed seam assembly, read:
 
-### H3 Assemble Existing Video Extension
+**[TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md)**
 
-Assembles source + continuation after the generated overlap has been hard-trimmed. Audio is fit to exact integer-sample durations before concatenation to prevent cumulative AV drift.
+Focused historical/reference documents are also retained:
 
-The included MP4 workflow uses the assembler's exact hard-cut audio while KJNodes handles the final video overlap.
 
-## Final video stitching
+## Credits
 
-Update 2 extends **H3 Motion Context Trim** without changing its original first two outputs:
+The original Motion Context project is by [NikoDemon80](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context).
 
-- `images` — fully hard-trimmed continuation image stream,
-- `audio` — fully hard-trimmed/matched continuation audio,
-- `crossfade_images` — video stream retaining only the requested final matching overlap,
-- `crossfade_frames` — effective overlap clamped to the actual context length.
+The H3 per-token video/audio latent masking work in this fork builds on the design introduced by **Barish Ozbay (`drozbay`)** in ComfyUI PR **#15375**.
 
-This allows context and video crossfade lengths to differ safely. Example: `context=90`, `crossfade=39` drops the older 51 duplicated context frames, keeps only the final 39 matching frames for the blend, and still trims all 90 frames from generated audio.
+See [MODIFICATIONS.md](MODIFICATIONS.md) for the detailed fork/update history and attribution.
 
-Recommended video stitch uses KJNodes **Image Batch Extend With Overlap** with:
+## License
 
-```text
-overlap_side: source
-overlap_mode: linear_blend
-```
-
-Audio is deliberately **not crossfaded**. The repeated generated audio prefix is removed and continuation audio is joined at the exact sample boundary.
-
-KJNodes is a workflow dependency only; the Python package does not import it.
-
-## Classic H3 Motion Context
-
-Classic Motion Context remains separate from the existing-video masked-prefix mechanism.
-
-Recommended continuation default:
-
-```text
-context_length:       39
-encode_mode:          video
-anchor_mode:          head
-audio_context_length: 0   # follows context_length
-audio_mode:          timeline
-```
-
-For H3-to-H3 chaining, `context_latent` can provide the previous sampler's joint AV latent for direct audio-tail reuse, avoiding repeated audio decode/re-encode.
-
-For native H3 video-run lengths such as `39` or `90`, `video` mode VAE-encodes the temporal run once. For other exact frame counts, Update 2 automatically falls back to the existing per-frame representation rather than moving the context endpoint.
-
-## Ref2VA + timeline audio
-
-A graph may contain ordinary Ref2VA refs before the Motion Context timeline-audio ref. Motion Context appends its marked timeline-audio ref last.
-
-The payload compatibility layer preserves keyframe video latents together with ref video/audio latents instead of allowing the refs branch to overwrite the keyframe list.
-
-## H3 Custom Keyframes
-
-The Custom Keyframes workflow/node is unchanged in Update 2.
-
-It supports arbitrary-position still-image H3 conditioning anchors and keeps the existing dynamic **+ Add keyframe / - Remove keyframe** UI.
-
-## Capability-aware compatibility
-
-Update 2 does not use ComfyUI version numbers to decide whether to patch.
-
-At feature execution time it checks the live implementation for the specific capabilities needed:
-
-- keyframe + ref payload composition,
-- H3 video/audio mask conditions in `MiniMaxH3.extra_conds`,
-- H3-specific mask preprocessing,
-- H3-specific inpaint scaling,
-- the H3 diffusion-model per-row mask engine.
-
-Native functionality is left untouched. If ComfyUI later merges PR #15375 or equivalent behavior, the corresponding compatibility code becomes a no-op automatically. Payload retirement is detected without relying on source-file text: native AV mask output keys or the native MiniMaxH3 AV-mask hook set are sufficient, so stripped builds and ordinary upstream refactors do not keep the fallback wrapper active unnecessarily.
-
-The Motion Context layout compatibility remains repo-specific because it also implements timeline-audio placement and the experimental `before` anchor mode.
-
-## Example workflows
-
-- `Simple Motion Context - No Reference Images.json` — 39-frame visual/timeline-audio default, KJ linear video stitching, hard-trimmed audio.
-- `Advanced Motion Context - Reference Images.json` — Ref2VA/MultiRef + Motion Context, same global context/crossfade controls.
-- `Music Video Motion Context - Song Driven Lipsync + Reference Images.json` — 39-frame visual-only Motion Context, KJ crossfade, original-song slice architecture. Song-slice start times and durations are calculated automatically from the current H3-valid frame count and visual context length.
-- `Advanced Extension of Input Videos.json` — advanced existing-MP4 extension with two character reference images, 39-frame masked AV prefix, KJ linear video overlap and exact hard-joined audio.
-- `Custom Keyframes Example.json` — unchanged.
-- `H3 Masked AV Extension - One Video Example - 192f.json` — VHS input, 39-frame masked AV prefix, 153 newly generated frames, frame/sample-exact audio assembly, a 39-frame linear visual overlap, plus separate VHS outputs for the raw 192-frame H3 clip and final stitched result.
-- `H3 Masked AV Bridge - Two Video Example - 192f.json` — two inputs, 39-frame preserved AV windows at both ends, 114 generated middle frames, and linear visual overlaps at both delivered joins.
-- `H3 FL2VA Song Latent Masking - Reference Images - Music Video.json` — FL2VA + two image references + exact master-song audio inserted into the target H3 audio latent with audio denoise mask `0`; later clips independently protect a 39-frame visual prefix, and the final export uses the untouched master song.
-
-See [example_workflows/README.md](example_workflows/README.md).
-
-## Workflow dependencies
-
-The updated continuation examples use:
-
-- **ComfyUI-KJNodes** for `Image Batch Extend With Overlap`,
-- **ComfyUI-VideoHelperSuite** for video loading/preview/output where present,
-- **rgthree-comfy** for the optional-clip group bypass control in the FL2VA song-latent music-video example.
-
-These are example-workflow dependencies only.
-
-## Important limitations
-
-- Existing-video extension currently targets MiniMax H3 joint video+audio latents and batch size 1.
-- Source video should be CFR or decoder-normalized; the included MP4 example forces 24 fps.
-- Masked MP4 prefix lengths must be native H3 full video runs (`5`, `22`, `39`, `56`, ...); off-grid requests snap down.
-- The masked prefix primarily solves the **join/seam** problem. It does not guarantee that H3 keeps the same composition indefinitely after leaving the preserved prefix.
-- Turbo/speedup settings can affect continuation behavior; do not assume one continuation-safe LoRA strength for every source/seed.
-- Long recursive generated-audio chains remain lossy. For fixed-song lip-sync, prefer the Update 4 FL2VA song-latent path so every clip is conditioned by the original master timeline rather than recursively generated H3 audio.
-- `H3 Song Audio + Masked Video Context` pads with silence if a requested clip extends past the end of the supplied master audio. The included example intentionally lets the final raw clip overrun the song and uses `trim_to_audio` on the final master-song render.
-
-## Development / regression checks
-
-Run the CPU/static Update 2 suite without importing ComfyUI itself:
-
-```bash
-python tests/run_update2_tests.py
-```
-
-The suite covers:
-
-- the original MultiRef timeline-audio structure checks,
-- exact 39-frame / 65-audio-step existing-video prefix construction,
-- exact final frame/sample accounting,
-- keyframe + ref payload composition,
-- AV mask condition extraction,
-- idempotent/self-healing wrapper installation,
-- native-capability no-op behavior,
-- H3 timing helpers and preferred AV boundaries,
-- updated workflow context/crossfade wiring,
-- Music Video 39-frame song-slice timeline defaults,
-- FL2VA exact-song latent masking and reproducible example-workflow wiring.
-
-## License / upstream
-
-Original project and copyright: **NikoDemon80**. This modified version remains under **GPL-3.0**. See [LICENSE](LICENSE).
-
-Upstream repository: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context
-
-Relevant ComfyUI compatibility reference:
-
-- PR [#15375 — Support per-token video and audio latent noise masks on MiniMax-H3](https://github.com/Comfy-Org/ComfyUI/pull/15375), authored by [Barish Ozbay (`drozbay`)](https://github.com/drozbay).
+GPL-3.0. See [LICENSE](LICENSE).

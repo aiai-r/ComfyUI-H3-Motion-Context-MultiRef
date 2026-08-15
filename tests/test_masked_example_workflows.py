@@ -37,7 +37,7 @@ def _node(data, type_name):
 
 
 def test_masked_one_video_example():
-    data = _load("H3 Masked AV Extension - One Video Example - 192f.json")
+    data = _load("NEW - Latent Masking - AV Extension - Minimal Single Clip.json")
     types = _types(data)
     assert "MiniMaxH3ExistingVideoMaskedContext" in types
     assert "MiniMaxH3AddGuide" not in types
@@ -58,7 +58,7 @@ def test_masked_one_video_example():
 
 
 def test_masked_one_video_exact_audio_and_vhs_outputs():
-    data = _load("H3 Masked AV Extension - One Video Example - 192f.json")
+    data = _load("NEW - Latent Masking - AV Extension - Minimal Single Clip.json")
     nodes = {n["id"]: n for n in data["nodes"]}
     links = {link[0]: link for link in data["links"]}
 
@@ -99,7 +99,7 @@ def test_masked_one_video_exact_audio_and_vhs_outputs():
 
 
 def test_masked_two_video_bridge_example():
-    data = _load("H3 Masked AV Bridge - Two Video Example - 192f.json")
+    data = _load("NEW - Latent Masking - AV Bridge - Two Videos.json")
     types = _types(data)
     assert "MiniMaxH3MaskedAVBridge" in types
     assert "MiniMaxH3AddGuide" not in types

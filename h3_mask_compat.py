@@ -9,9 +9,11 @@ Every capability is checked against the live ComfyUI implementation. Native
 support wins; compatibility is installed only for missing pieces. Restarting
 ComfyUI still reverts all runtime modifications.
 
-The compatibility snapshot tracks the PR's fractional/8-bit mask behavior as
-reviewed on 2026-08-11, but intentionally targets the aligned AV masks produced
-by this repo's existing-video node rather than acting as a general sampler patch.
+The fallback snapshot tracks the PR's fractional/8-bit mask behavior from the
+pre-2026-08-15 implementation, but capability detection also recognizes the
+newer PR architecture that removed ``process_denoise_mask`` and performs token-
+grid alignment inside ``MiniMaxH3.scale_latent_inpaint``. Native support always
+wins; the older fallback is only installed on ComfyUI builds that need it.
 """
 
 from __future__ import annotations
@@ -91,14 +93,39 @@ def capability_status():
         and _is_ours(forward)
         and _is_ours(inner)
     )
+    engine_native = bool(engine_complete and not engine_ours)
+    process_compat = bool(callable(process) and _is_ours(process))
+    scale_compat = bool(callable(scale) and _is_ours(scale))
+
+    # PR #15375 changed architecture on 2026-08-15: mask snapping moved out of
+    # process_denoise_mask and the sampler now passes the original denoise mask
+    # into MiniMaxH3.scale_latent_inpaint. A subclass-owned native scale method
+    # with explicit x+denoise_mask inputs is the fingerprint for that design.
+    native_inpaint_mask_alignment = bool(
+        engine_native
+        and scale_native
+        and _signature_has(scale, "x", "denoise_mask")
+    )
+    legacy_preprocess_alignment = bool(
+        (process_native or process_compat)
+        and (scale_native or scale_compat)
+    )
+    mask_model_ready = bool(
+        engine_complete
+        and (scale_native or scale_compat)
+        and (native_inpaint_mask_alignment or legacy_preprocess_alignment)
+    )
 
     return {
         "process_denoise_mask_native": process_native,
-        "process_denoise_mask_compat": bool(callable(process) and _is_ours(process)),
+        "process_denoise_mask_compat": process_compat,
         "scale_latent_inpaint_native": scale_native,
-        "scale_latent_inpaint_compat": bool(callable(scale) and _is_ours(scale)),
+        "scale_latent_inpaint_compat": scale_compat,
+        "native_inpaint_mask_alignment": native_inpaint_mask_alignment,
+        "legacy_preprocess_alignment": legacy_preprocess_alignment,
+        "mask_model_ready": mask_model_ready,
         "mask_engine_complete": engine_complete,
-        "mask_engine_native": bool(engine_complete and not engine_ours),
+        "mask_engine_native": engine_native,
         "mask_engine_compat": engine_ours,
         "mask_engine_indicators": engine_indicators,
     }
@@ -171,11 +198,19 @@ def ensure_h3_mask_compat():
         _install_engine_compat(h3m)
         _LOG.info("h3_motion_context: PR #15375 diffusion-mask compatibility enabled")
 
-    # Build both hook functions once, then install only missing subclass
-    # overrides. This keeps native implementations authoritative.
-    need_process = not (
-        "process_denoise_mask" in cls.__dict__
-        and callable(getattr(cls, "process_denoise_mask", None))
+    # Re-probe after the engine step. The current (Aug-15+) native PR design
+    # deliberately has no MiniMaxH3.process_denoise_mask; in that case the
+    # subclass-owned scale_latent_inpaint(x=..., denoise_mask=...) performs the
+    # required token-grid alignment and must remain authoritative.
+    current = capability_status()
+    native_alignment = current["native_inpaint_mask_alignment"]
+
+    need_process = bool(
+        not native_alignment
+        and not (
+            "process_denoise_mask" in cls.__dict__
+            and callable(getattr(cls, "process_denoise_mask", None))
+        )
     )
     need_scale = not (
         "scale_latent_inpaint" in cls.__dict__
@@ -191,18 +226,7 @@ def ensure_h3_mask_compat():
             _LOG.info("h3_motion_context: PR #15375 inpaint scaling compatibility enabled")
 
     after = capability_status()
-    ready = (
-        after["mask_engine_complete"]
-        and (
-            after["process_denoise_mask_native"]
-            or after["process_denoise_mask_compat"]
-        )
-        and (
-            after["scale_latent_inpaint_native"]
-            or after["scale_latent_inpaint_compat"]
-        )
-    )
-    if not ready:
+    if not after["mask_model_ready"]:
         raise RuntimeError(
             "h3_motion_context: H3 AV-mask compatibility is incomplete after patching"
         )
@@ -214,8 +238,4 @@ def is_ready():
         s = capability_status()
     except Exception:
         return False
-    return bool(
-        s["mask_engine_complete"]
-        and (s["process_denoise_mask_native"] or s["process_denoise_mask_compat"])
-        and (s["scale_latent_inpaint_native"] or s["scale_latent_inpaint_compat"])
-    )
+    return bool(s["mask_model_ready"])

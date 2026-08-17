@@ -36,17 +36,9 @@ def largest_h3_video_run(frames):
 
 def _require_h3_mask_support():
     from .h3_compat import ensure_existing_video_compat
+    # Native PR #15375 support wins, including the Aug-15+ no-preprocess-hook
+    # architecture. The compatibility orchestrator validates the full path.
     ensure_existing_video_compat()
-    import comfy.model_base
-    cls = getattr(comfy.model_base, "MiniMaxH3", None)
-    if (
-        cls is None
-        or "process_denoise_mask" not in cls.__dict__
-        or "scale_latent_inpaint" not in cls.__dict__
-    ):
-        raise RuntimeError(
-            "h3_masked_bridge: H3 AV mask compatibility could not be enabled"
-        )
 
 
 def _pixel_frames(latent_t):

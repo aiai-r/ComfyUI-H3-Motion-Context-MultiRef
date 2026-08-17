@@ -268,8 +268,7 @@
             "type": "temp",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "clip01_00001.png",
-            "fullpath": "/home/danline/ComfyUI2/temp/h3_preview/clip01_00001-audio.mp4"
+            "workflow": "clip01_00001.png"
           }
         }
       }
@@ -1038,8 +1037,7 @@
             "type": "output",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "motion_context_00032.png",
-            "fullpath": "/home/danline/ComfyUI2/output/video/motion_context_00032-audio.mp4"
+            "workflow": "motion_context_00032.png"
           }
         }
       }
@@ -1394,8 +1392,7 @@
             "type": "temp",
             "format": "video/h264-mp4",
             "frame_rate": 24,
-            "workflow": "clip02_00001.png",
-            "fullpath": "/home/danline/ComfyUI2/temp/h3_preview/clip02_00001-audio.mp4"
+            "workflow": "clip02_00001.png"
           }
         }
       }

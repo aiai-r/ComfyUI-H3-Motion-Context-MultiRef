@@ -4,6 +4,8 @@ This document explains the implementation behind the workflows in this repositor
 
 If you only want to choose and run a workflow, start with [README.md](README.md) and [example_workflows/README.md](example_workflows/README.md).
 
+> **Update 6 current-state note:** the AV Extension and Music Video examples are checkpoint-free direct-latent workflows. Their public final outputs stream frames directly into VideoHelperSuite instead of materializing one complete ComfyUI `IMAGE` movie tensor. Small H3 decoded-audio duration undershoots are time-conformed to the exact frame-derived sample timeline before seam cutting. Sections 14–19 below document the historical Update-5 checkpoint architecture for context; those checkpoint/resume nodes are no longer registered by the current node pack.
+
 ---
 
 ## 1. Architecture overview
@@ -33,9 +35,10 @@ Main nodes:
 - `H3 Masked AV Bridge`
 - `H3 Song Audio + Masked Video Context`
 
-Typical workflow label:
+Current workflow examples:
 
-- `NEW - Latent Masking - ...`
+- `NEW - AV Extension.json`
+- `NEW - Music Video.json`
 
 The two families can coexist in the same repository because they solve continuation in different ways.
 
@@ -55,7 +58,7 @@ The custom nodes therefore avoid assuming that `latent["samples"]` is one ordina
 This matters for:
 
 - target-latent masking;
-- checkpoint serialization;
+- historical checkpoint serialization;
 - direct generated-latent continuation;
 - master-song audio replacement.
 
@@ -120,6 +123,10 @@ This is why **39 frames** is the default continuation context throughout the cur
 
 ---
 
+For Update-6 masked AV continuation, a protected context must be both a valid H3 video-VAE run and an exact 40 Hz audio-latent boundary. The shared sequence is `39, 90, 141, 192, 243, ...` frames. Requested context values are snapped downward to the largest shared boundary that fits the available source and target. This avoids fractional audio endpoints such as 73 video frames (`121.666...` audio ticks).
+
+Final decoded-audio stitching uses **absolute frame-to-sample boundaries** rather than repeatedly rounding a relative context duration. At 44.1 kHz, for example, two 39-frame seams can legitimately require 71662 and 71663 samples at different absolute timeline positions.
+
 ## 4. Why some target clips have a rounded audio tail
 
 A full H3 target does not always end on an exact 40 Hz audio boundary.
@@ -150,6 +157,14 @@ This distinction is important for the master-song workflow because an audio VAE 
 5. cropping the encoded latent to the exact target-audio length.
 
 The implementation does not solve the mismatch by inventing/repeating a latent token.
+
+### Decoded-audio timebase conformance
+
+The inverse problem also appears after H3 audio-VAE decode. A video-valid clip such as 362 frames does not represent an integer number of 40 Hz audio ticks, so the decoded waveform can be a few hundred samples shorter than the exact picture timeline.
+
+For small grid-sized mismatches, `existing_video_extension.py` uses `_conform_waveform_length()` to resample the decoded waveform by the tiny rational ratio required to reach the exact frame-derived sample span. This happens **before** the protected-context samples are removed. The seam cut itself then uses absolute frame-to-sample boundaries.
+
+The conformance path is deliberately bounded (`max_fractional_change=0.005` by default). A larger mismatch is treated as a real error rather than being silently stretched. The implementation does not append a zero/silence tail for these normal H3 grid undershoots.
 
 ---
 
@@ -227,7 +242,7 @@ MiniMaxH3GeneratedAVMaskedContext
 
 Purpose: continue from a previous **generated H3 clip** without decoding and re-encoding its continuation context.
 
-The previous sampler/checkpoint already contains the H3 video/audio latent representation. The node therefore copies the previous clip's final valid AV latent run directly into the next target's prefix.
+The previous sampler already contains the H3 video/audio latent representation. The node therefore copies the previous clip's final valid AV latent run directly into the next target's prefix.
 
 For a 39-frame continuation window, it derives the corresponding H3 video-latent and audio-latent lengths, copies the tail, and protects the copied prefix with mask `0`.
 
@@ -382,13 +397,55 @@ large batch + clip 3 -> larger IMAGE batch
 larger batch + clip 4 -> ...
 ```
 
-The current checkpoint assemblers preserve the blend operation while avoiding the ever-growing ComfyUI image batch.
+The historical Update-5 checkpoint assemblers preserved the blend operation while avoiding the ever-growing ComfyUI image batch.
 
 ---
 
-## 13. Checkpoint format
+## 13. Current Update-6 direct VHS final streaming
 
-Current long-form workflows can save each completed H3 joint AV sampler output using:
+The current long-form workflows use direct single-pass streaming backed by VideoHelperSuite:
+
+- `H3 Stream Final AV Extension to VHS` (`MiniMaxH3StreamLiveExtensionAVToVHS`) is the AV Extension output node.
+- `H3 Stream Final Music Video to VHS` (`MiniMaxH3StreamLiveMusicVideoToVHS`) performs the Music Video encode and returns `VHS_FILENAMES`; `H3 Final Stream Output Sink` (`MiniMaxH3FinalizeVHSOutput`) is the terminal output node for that workflow.
+
+The Music Video streamer is intentionally an intermediate-output node. Keeping the tiny filename sink one graph step after it prevents the streamer's all-clips dependency chain from competing with each clip-local `VAEDecode -> VHS Video Combine` preview as an equally direct output dependency.
+
+A normal ComfyUI `IMAGE` output is a materialized tensor. For long H3 timelines, a complete RGB float32 movie can therefore consume tens of GiB before the encoder even starts. The Update-6 streaming nodes avoid exposing the final movie as an `IMAGE` output.
+
+The internal frame source is a one-shot sequence tailored to the access pattern used by `VHS_VideoCombine`: VHS asks for `len(images)`, probes `images[0]` for dimensions, and then iterates the source. The sequence primes the generator once so Clip 1 is not decoded twice.
+
+Final filename allocation is intentionally left to VHS. The H3 streaming layer passes through `filename_prefix` but does not construct, overwrite, rename, or delete final output paths. VHS therefore owns its normal numbered-output counter across repeated runs. This is a release invariant: final H3 output code must not return to a fixed filename that replaces the previous run.
+
+For generated clips, the streamer:
+
+1. decodes one H3 video latent to CPU float32;
+2. computes the same effective overlap rule as the old assembler (`min(requested_overlap, effective_context, written_timeline)`);
+3. keeps only the tail needed for the next seam;
+4. linearly blends that retained tail against the matching decoded context of the next clip;
+5. yields completed frames to VHS;
+6. releases the decoded clip before continuing.
+
+For an uploaded Existing Video source, source frames are CFR-indexed to 24 fps and resized in small chunks; only the source seam tail is retained before generated Extension 1.
+
+The AV streamer builds the final audio waveform separately using exact absolute sample boundaries and the decoded-audio timebase conformance described above. The Music Video streamer passes the original master waveform through unchanged.
+
+### Inline VHS preview refresh
+
+The current controllers own real ComfyUI bypass mode for preview groups. VideoHelperSuite can return the same temp filename/type/format after overwriting a completed preview. Its normal `updateParameters()` path may treat those parameters as unchanged and skip the visible inline refresh.
+
+For controller-managed preview groups only, the H3 frontend detects that exact same-result condition. After VHS's normal execution handler has run, it invalidates only the stored filename and calls VHS's own `updateParameters(params, true)` once. It does **not** directly call the video widget's `updateSource()` method, avoiding the partial/truncated reload behavior seen with forced source refreshes.
+
+### ComfyUI result caching
+
+The streaming nodes bound the RAM used by final RGB assembly, but they do not control ComfyUI's node-result cache. ComfyUI's default RAM-pressure cache can retain sampler/latent results between nodes and runs until its own pressure thresholds decide to evict them. This can make total process RAM rise across a long chain even when final streaming itself remains bounded.
+
+The workflow JSON does not select a cache policy. `--cache-none` is useful as a diagnostic because it disables result reuse and lowers RAM/VRAM use, but it also recomputes every node on each manual run; it is not required for the Update-6 workflows. Bounded or RAM-pressure cache choices remain a ComfyUI runtime decision.
+
+---
+
+## 14. Historical Update-5 checkpoint format
+
+Update 5 long-form workflows saved each completed H3 joint AV sampler output using:
 
 ```text
 H3 Checkpoint Save
@@ -425,9 +482,9 @@ Latents:
 
 ---
 
-## 14. Lazy resume
+## 15. Historical Update-5 lazy resume
 
-Resume is supported at **completed clip boundaries**.
+The Update-5 architecture supported resume at **completed clip boundaries**.
 
 The repository does not attempt to resume a sampler halfway through its diffusion steps.
 
@@ -459,7 +516,7 @@ This allows the multi-clip masked AV extension to continue directly from a saved
 
 ---
 
-## 15. Final checkpoint trigger
+## 16. Historical Update-5 final checkpoint trigger
 
 `H3 Checkpoint Final Trigger` is a lazy dependency helper.
 
@@ -469,9 +526,9 @@ This is especially important in workflows with many available slots but only som
 
 ---
 
-## 16. RAM-safe music-video assembly
+## 17. Historical Update-5 music-video checkpoint assembly
 
-`H3 Assemble Checkpoints` assembles the master-song music video from saved H3 checkpoints.
+`H3 Assemble Checkpoints` assembled the Update-5 master-song music video from saved H3 checkpoints.
 
 It deliberately does not create one final ComfyUI `IMAGE` output containing the complete movie.
 
@@ -524,11 +581,11 @@ For the master-song workflow, ffmpeg muxes the original master audio.
 
 ---
 
-## 17. RAM-safe existing-video extension assembly
+## 18. Historical Update-5 existing-video checkpoint assembly
 
 `H3 Assemble Extension Checkpoints` performs the corresponding job for normal audiovisual extension.
 
-Update 5 additionally introduces `H3 Start Masked Context`, `H3 Start Canvas Selector`, and `H3 Assemble Starter + Extension Checkpoints` so the same multi-clip masked-AV workflow can either begin from an uploaded source video or from a generated starter clip (pure T2V or I2V). The starter path is also checkpointed and assembled sequentially, so it keeps the same low-memory / low-OOM behavior as the source-video path.
+Update 5 additionally introduced `H3 Start Masked Context`, `H3 Start Canvas Selector`, and `H3 Assemble Starter + Extension Checkpoints` so the same multi-clip masked-AV workflow could either begin from an uploaded source video or from a generated starter clip (pure T2V or I2V). The starter path was also checkpointed and assembled sequentially, so it kept the same low-memory / low-OOM behavior as the source-video path.
 
 Unlike the music-video workflow, generated H3 audio is part of the delivered continuation.
 
@@ -545,7 +602,7 @@ The assembler therefore:
 
 ---
 
-## 18. Why checkpoint assembly fixes the long-video RAM problem
+## 19. Historical checkpoint-memory rationale
 
 A decoded ComfyUI `IMAGE` batch is normally a floating-point tensor.
 
@@ -569,7 +626,7 @@ Disk becomes the durable intermediate store, while RAM remains bounded by the cu
 
 ---
 
-## 19. Runtime compatibility layers
+## 20. Runtime compatibility layers
 
 The repository has historically supported ComfyUI versions at different stages of H3 feature development.
 
@@ -599,9 +656,13 @@ The mask layer is kept separate from normal Motion Context so using a legacy gui
 
 Detection is capability-oriented so newer native ComfyUI support can make the fallback path retire itself.
 
+PR #15375 changed its internal integration on 2026-08-15 (commit `989e7a9`): the earlier `MiniMaxH3.process_denoise_mask` preprocessing hook was removed, and token-grid mask/blend alignment moved into `MiniMaxH3.scale_latent_inpaint(..., x=..., denoise_mask=...)`. The compatibility layer recognizes both layouts. On a ComfyUI build with the newer native architecture it does **not** reinstall the older preprocessing hook; native mask alignment and payload handling remain authoritative.
+
+The workflow-facing mask contract is unchanged: `0 = preserve`, `1 = generate`, with fractional audio values allowed for the AV feather. The current PR quantizes fractional mask strengths to a bounded set of levels before deriving per-row timesteps, so the Update-6 half-cosine audio feather remains compatible with the newer native implementation.
+
 ---
 
-## 20. Main node reference
+## 21. Main node reference
 
 ### Guide/legacy nodes
 
@@ -624,75 +685,44 @@ Detection is capability-oriented so newer native ComfyUI support can make the fa
 | H3 Optional Reference Image | Lazy optional global reference-image slot |
 | H3 Crop Source To /32 | Prepare source image geometry for H3 workflows |
 
-### Checkpoint/resume/assembly nodes
+### Direct-latent long-form nodes
 
 | Display name | Purpose |
 |---|---|
-| H3 Checkpoint Save | Atomic fixed-slot H3 AV latent checkpoint |
-| H3 Checkpoint Load | Load a saved checkpoint as a decodable H3 latent |
-| H3 Resume / Live Tail Frames | Lazy live-vs-checkpoint visual continuation selector |
-| H3 Resume / Live AV Latent | Lazy live-vs-checkpoint joint AV latent selector |
-| H3 Checkpoint Final Trigger | Lazy final active checkpoint dependency |
-| H3 Assemble Checkpoints | Sequential master-song video assembly from checkpoints |
-| H3 Assemble Extension Checkpoints | Sequential existing-video + generated AV assembly |
 | H3 Start Masked Context | First-extension selector: source-video prefix or generated-starter latent tail |
-| H3 Start Canvas Selector | Shared width/height selector for source-video vs generated-starter starts |
-| H3 Assemble Starter + Extension Checkpoints | Sequential assembly for either source-video or generated-starter chains |
-| H3 Assemble Existing Video Extension | Single-extension source + continuation assembly helper |
+| H3 Start Canvas Selector | Shared source/generated resolution selector |
+| H3 Stream Final AV Extension to VHS | Decode source/starter + 1–6 live extensions sequentially and stream completed frames directly into VHS without a full final IMAGE movie tensor |
+| H3 Song Audio + Masked Video Context | Insert the exact master-song slice and optionally copy the previous generated video latent tail |
+| H3 Stream Final Music Video to VHS | Decode up to 20 live clip latents sequentially and stream directly into VHS while passing the untouched master song |
+| H3 Final Stream Output Sink | Terminal `VHS_FILENAMES` sink used by Music Video to keep clip-preview scheduling ahead of the all-clips final-stream dependency chain |
+| H3 AV Extension Controller | Start mode, active extension count, audio feather, and preview policy |
+| H3 Music Video Controller | Active clip count and preview policy |
+
+The Update-5 checkpoint/resume nodes are no longer registered in Update 6. The historical sections above remain only to document the previous implementation and migration context.
 
 ---
 
-## 21. Workflow categories
+## 22. Workflow categories
 
-The filenames communicate architecture rather than release status.
+Only the two current Update-6 workflows use the `NEW -` prefix:
 
-### `NEW - Latent Masking - ...`
+### `NEW - AV Extension.json`
 
-Current recommended target-latent workflows.
+General long-form extension from an existing video or generated T2V/I2V starter, with optional global image/audio references.
 
-### `OLD - Motion Context - ...`
+### `NEW - Music Video.json`
 
-Legacy native-guide workflows. They are intentionally kept available and regression-tested.
+Long-form song-driven generation with exact master-song slices and direct previous-latent continuation.
 
-### `OLD - Hybrid - ...`
+Secondary examples are clearly separated:
 
-Mixed architecture, generally retained for comparison/backward compatibility.
+- `UTILITY - AV Bridge.json`
+- `UTILITY - Custom Keyframes.json`
+- `OLD - Motion Context - Simple.json`
+- `OLD - Motion Context - Advanced.json`
+- `OLD - Hybrid Extension.json`
 
-### `UTILITY - ...`
-
-Small feature examples.
-
-### Master-song music video
-
-```text
-NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json
-```
-
-Use for long-form lip-sync/song-driven generation with reference images, checkpoints, resume, and original-master final audio.
-
-### Existing-video multi-clip extension
-
-```text
-NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images.json
-```
-
-Use for extending one uploaded source through multiple generated H3 clips, optionally with global reference images.
-
-### Minimal extension
-
-```text
-NEW - Latent Masking - AV Extension - Minimal Single Clip.json
-```
-
-Use to understand/debug the first source-video masked continuation.
-
-### Two-video bridge
-
-```text
-NEW - Latent Masking - AV Bridge - Two Videos.json
-```
-
-Use when both endpoints already exist and the missing content should be generated between them.
+Direct latent continuation is an implementation detail of the two current workflows, not a separate workflow category.
 
 ---
 
@@ -710,21 +740,26 @@ The tests cover, among other things:
 - direct generated-AV latent continuation;
 - master-song audio masking;
 - the one-token audio-grid boundary regression;
-- checkpoint save/load and lazy resume;
-- workflow JSON consistency;
-- checkpoint assembly logic.
+- direct-stream final workflow wiring and absence of a separate full-movie VHS input chain;
+- absence of the superseded materialized full-movie Update-6 assembler nodes;
+- Music Video intermediate-stream/terminal-sink scheduling topology;
+- same-result VHS inline-preview refresh behavior;
+- exact decoded-audio timebase conformance and no-silence-tail regression;
+- streamed-frame equivalence against the former full-buffer seam math;
+- one-shot VHS frame-sequence behavior;
+- workflow JSON consistency.
 
-Run the repository test runner with:
+Run the standalone repository regressions with:
 
 ```bash
-python tests/run_update2_tests.py
+pytest -q
 ```
 
-The historical filename of the runner is retained even though it now covers later updates too.
+The pytest entry point delegates to the isolated mock runner because several test modules intentionally install different lightweight ComfyUI mocks. The same underlying checks can also be run directly with `python tests/run_tests.py`.
 
 ---
 
 ## 24. Additional focused references
 
 - [MODIFICATIONS.md](MODIFICATIONS.md) — release history.
-- [example_workflows/README.md](example_workflows/README.md) — the single workflow chooser, setup guide, reproduction guide, and per-workflow reference.
+- [example_workflows/README.md](example_workflows/README.md) — practical usage notes for the included workflows.

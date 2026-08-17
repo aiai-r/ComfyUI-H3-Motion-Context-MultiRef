@@ -1,4 +1,4 @@
-"""MiniMax H3 FL clip prep with exact master-song audio and optional video prefix."""
+"""MiniMax H3 music-video clip prep with exact master-song audio and live video context."""
 
 import logging
 import math
@@ -7,6 +7,8 @@ import torch
 
 import comfy.nested_tensor
 import comfy.utils
+
+from .h3_timing import sample_boundary_from_seconds
 
 try:
     from .h3_compat import ensure_existing_video_compat
@@ -26,18 +28,9 @@ FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 
 
 def _require_h3_mask_support():
+    # Native PR #15375 support wins, including the Aug-15+ no-preprocess-hook
+    # architecture. The compatibility orchestrator validates the full path.
     ensure_existing_video_compat()
-    import comfy.model_base
-
-    cls = getattr(comfy.model_base, "MiniMaxH3", None)
-    if (
-        cls is None
-        or "process_denoise_mask" not in cls.__dict__
-        or "scale_latent_inpaint" not in cls.__dict__
-    ):
-        raise RuntimeError(
-            "h3_song_audio: H3 AV mask compatibility could not be enabled. Check the ComfyUI console capability report."
-        )
 
 
 def _pixel_frames(latent_t):
@@ -72,6 +65,21 @@ def _streams_from_latent(latent):
             % (tuple(audio.shape),)
         )
     return video, audio
+
+
+def _video_steps_for_frames(frame_count):
+    """Return the exact H3 video-latent step count for a valid pixel-frame run."""
+    frame_count = int(frame_count)
+    total = 0
+    for steps in range(1, 100000):
+        total += FRAME_PER_TOKEN[(steps - 1) % len(FRAME_PER_TOKEN)]
+        if total == frame_count:
+            return steps
+        if total > frame_count:
+            break
+    raise ValueError(
+        "h3_song_audio: %d frames are not an exact H3 temporal run" % frame_count
+    )
 
 
 def _resize_images(images, width, height, crop, chunk=32):
@@ -186,7 +194,7 @@ class MiniMaxH3SongMaskedAVContext:
         return {
             "required": {
                 "latent": ("LATENT", {
-                    "tooltip": "Target AV latent from MiniMax H3 Image to Video (FL path)."
+                    "tooltip": "Target AV latent from MiniMax H3 Reference to Video."
                 }),
                 "audio_vae": ("VAE", {
                     "tooltip": "MiniMax H3 audio VAE. Used to encode the master-song slice into the target audio latent."
@@ -210,10 +218,13 @@ class MiniMaxH3SongMaskedAVContext:
             },
             "optional": {
                 "vae": ("VAE", {
-                    "tooltip": "MiniMax H3 video VAE. Required only when source_frames is connected."
+                    "tooltip": "MiniMax H3 video VAE. Required only for the legacy source_frames continuation path."
                 }),
                 "source_frames": ("IMAGE", {
-                    "tooltip": "Optional previous clip frames. The node preserves the final context_length canonical 24fps frames as a protected visual prefix."
+                    "tooltip": "Legacy decoded-frame continuation path. Prefer source_latent for checkpoint-free live clip chaining."
+                }),
+                "source_latent": ("LATENT", {
+                    "tooltip": "Preferred live continuation input. Copies the previous H3 video latent tail directly into the new target while the master-song audio slice remains authoritative."
                 }),
             },
         }
@@ -223,7 +234,7 @@ class MiniMaxH3SongMaskedAVContext:
     FUNCTION = "prepare"
     CATEGORY = "conditioning/minimax"
     DESCRIPTION = (
-        "Write an exact master-song slice into the target H3 audio latent and protect the entire audio stream from denoising. Optionally also preserve a previous-clip visual prefix."
+        "Write an exact master-song slice into the target H3 audio latent and protect the entire audio stream from denoising. For continuations, prefer a previous live H3 source_latent so the video tail is copied directly without decode/re-encode."
     )
 
     def prepare(
@@ -237,6 +248,7 @@ class MiniMaxH3SongMaskedAVContext:
         crop="disabled",
         vae=None,
         source_frames=None,
+        source_latent=None,
     ):
         _require_h3_mask_support()
 
@@ -266,15 +278,21 @@ class MiniMaxH3SongMaskedAVContext:
         vae_sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
         waveform = _stereo_first_batch(master_audio["waveform"], "master_audio")
         waveform = _resample_waveform(waveform, int(master_audio["sample_rate"]), vae_sr, "master_audio")
-        start_sample = int(round(float(clip_start_seconds) * vae_sr))
+        clip_start_seconds = float(clip_start_seconds)
+        start_sample = sample_boundary_from_seconds(clip_start_seconds, vae_sr)
         if start_sample < 0:
             raise ValueError("h3_song_audio: clip_start_seconds must be >= 0")
-        # Keep clip_audio tied to the exact picture duration, but encode enough
-        # master audio to cover the *rounded H3 audio grid*.  These are not
-        # always the same duration: 124 video frames need 165333 samples at
-        # 32 kHz, while a 207-token H3 audio target spans 165600 samples.
-        picture_samples = int(round(target_frames / FPS * vae_sr))
-        picture_end_sample = start_sample + picture_samples
+        # Derive BOTH endpoints from the absolute master-song timeline.
+        # Do not round the clip duration separately and add it to start_sample:
+        # at rates such as 32 kHz / 24 fps that can move an endpoint by one
+        # sample on some clip indices.  Absolute endpoints guarantee that the
+        # conditioning slice occupies exactly the same timeline interval as
+        # this raw video's pixel frames.
+        picture_end_seconds = clip_start_seconds + target_frames / FPS
+        picture_end_sample = sample_boundary_from_seconds(picture_end_seconds, vae_sr)
+        picture_samples = picture_end_sample - start_sample
+        if picture_samples < 1:
+            raise RuntimeError("h3_song_audio: computed an empty master-song slice")
         audio_slice = waveform[..., start_sample:picture_end_sample]
         audio_slice = _fit_waveform(audio_slice, picture_samples, "master audio slice")
 
@@ -349,7 +367,49 @@ class MiniMaxH3SongMaskedAVContext:
 
         video_steps = 0
         n = 0
-        if source_frames is not None:
+        if source_latent is not None and source_frames is not None:
+            raise ValueError(
+                "h3_song_audio: connect either source_latent or source_frames, not both"
+            )
+
+        if source_latent is not None:
+            source_video, _source_audio = _streams_from_latent(source_latent)
+            if int(source_video.shape[0]) != 1:
+                raise ValueError("h3_song_audio: source_latent batch size 1 only")
+            if int(context_length) <= 0:
+                raise ValueError(
+                    "h3_song_audio: context_length must be > 0 when source_latent is connected"
+                )
+            if (
+                int(source_video.shape[4]) != int(target_video.shape[4])
+                or int(source_video.shape[3]) != int(target_video.shape[3])
+                or int(source_video.shape[1]) != int(target_video.shape[1])
+            ):
+                raise ValueError(
+                    "h3_song_audio: source_latent and target latent video shapes/resolution must match"
+                )
+
+            available = _pixel_frames(int(source_video.shape[2]))
+            n = _snap_context_length(context_length, available, target_frames)
+            video_steps = _video_steps_for_frames(n)
+            if video_steps >= int(target_video.shape[2]):
+                raise ValueError("h3_song_audio: video context consumes the whole target latent")
+            if video_steps > int(source_video.shape[2]):
+                raise RuntimeError("h3_song_audio: source_latent is shorter than requested context")
+
+            tail_start = int(source_video.shape[2]) - video_steps
+            if tail_start % len(FRAME_PER_TOKEN) != 0:
+                raise ValueError(
+                    "h3_song_audio: source_latent tail begins at H3 temporal phase %d; "
+                    "use an H3-safe source length or the source_frames fallback"
+                    % (tail_start % len(FRAME_PER_TOKEN))
+                )
+            vp = source_video[:, :, tail_start:, :, :].to(
+                device=out_video.device, dtype=out_video.dtype
+            )
+            out_video[:, :, :video_steps] = vp
+
+        elif source_frames is not None:
             if vae is None:
                 raise ValueError("h3_song_audio: vae is required when source_frames is connected")
             if getattr(source_frames, "ndim", 0) != 4 or int(source_frames.shape[0]) < 1:

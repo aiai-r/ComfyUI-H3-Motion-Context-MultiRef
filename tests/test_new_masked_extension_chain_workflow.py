@@ -1,219 +1,175 @@
 import json
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WF = ROOT / 'example_workflows' / 'NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images.json'
+WF = ROOT / 'example_workflows' / 'NEW - AV Extension.json'
 
 
 def load():
-    with WF.open(encoding='utf-8') as f:
-        return json.load(f)
+    return json.loads(WF.read_text(encoding='utf-8'))
 
 
-def test_new_masked_extension_chain_structure():
-    data = load()
-    nodes = data['nodes']
-    types = [n['type'] for n in nodes]
-    assert types.count('MiniMaxH3ReferenceToVideo') == 6
-    assert types.count('MiniMaxH3StartCheckpointMaskedContext') == 1
+def _nodes(data):
+    return {n['id']: n for n in data['nodes']}
+
+
+def _links(data):
+    return {l[0]: l for l in data['links']}
+
+
+def _input(node, name):
+    return next(i for i in node.get('inputs', []) if i['name'] == name)
+
+
+def test_live_extension_structure_is_checkpoint_free_and_ref2va_only():
+    data = load(); types = [n['type'] for n in data['nodes']]
+    assert types.count('MiniMaxH3ReferenceToVideo') == 7  # starter + 6 extensions
     assert types.count('MiniMaxH3GeneratedAVMaskedContext') == 5
-    assert types.count('MiniMaxH3CheckpointSavePath') == 7  # starter + 6 extensions
-    assert types.count('MiniMaxH3ResumeCheckpointLatent') == 5
-    assert types.count('MiniMaxH3OptionalReferenceImage') == 2
-    assert types.count('MiniMaxH3OptionalStartFrame') == 1
-    assert types.count('MiniMaxH3ExtensionStartMode') == 1
-    assert types.count('MiniMaxH3StartCanvasSelector') == 1
-    assert types.count('MiniMaxH3ImageToVideo') == 1
-    assert types.count('MiniMaxH3CheckpointTrigger') == 1
-    assert types.count('MiniMaxH3AssembleStarterOrExtensionCheckpoints') == 1
-    assert types.count('UNETLoader') == 2  # REF2VA extensions + FL2VA starter
-    assert 'MiniMaxH3MotionContext' not in types
-    assert 'ImageBatchExtendWithOverlap' not in types
-    assert 'AudioConcat' not in types
-    assert types.count('VAEDecode') == 7  # generated starter + 6 extension previews
-    assert types.count('VAEDecodeAudio') == 7
-    assert types.count('VHS_VideoCombine') == 7
+    assert types.count('MiniMaxH3StartMaskedContext') == 1
+    assert types.count('MiniMaxH3AVExtensionController') == 1
+    assert types.count('MiniMaxH3StreamLiveExtensionAVToVHS') == 1
+    assert types.count('MiniMaxH3AssembleLiveExtensionAV') == 0
+    assert types.count('VHS_VideoCombine') == 7  # starter + six clip previews only
+    assert types.count('MiniMaxH3CustomKeyframes') >= 1
+    assert types.count('UNETLoader') == 1
+    assert not any('Checkpoint' in t for t in types)
+    assert not any('rgthree' in t.lower() for t in types)
+    assert 'MiniMaxH3ImageToVideo' not in types
+    assert 'MiniMaxH3OptionalReferenceImage' not in types
+    loader = next(n for n in data['nodes'] if n['type'] == 'UNETLoader')
+    assert 'ref2va' in loader['widgets_values'][0]
 
 
-def test_new_masked_extension_chain_seeds_and_controls():
-    data = load()
-    nodes = data['nodes']
-    noises = [n for n in nodes if n['type'] == 'RandomNoise']
-    assert len(noises) == 7
-    assert all(n['widgets_values'][1] == 'fixed' for n in noises)
-
-    active = next(n for n in nodes if n.get('title') == 'GLOBAL ACTIVE EXTENSION COUNT — MATCH HIGHEST ENABLED (DEFAULT 1)')
-    resume = next(n for n in nodes if n.get('title') == 'GLOBAL RESUME FROM EXTENSION — 0 = NORMAL')
-    mode = next(n for n in nodes if n['type'] == 'MiniMaxH3ExtensionStartMode')
-    assert active['widgets_values'][0] == 1
-    assert resume['widgets_values'][0] == 0
-    assert mode['widgets_values'][0] in ('start with T2V/I2V', 'Start from existing video')
-
-    final = next(n for n in nodes if n['type'] == 'MiniMaxH3AssembleStarterOrExtensionCheckpoints')
-    assert final['widgets_values'][1] == 'h3_extension_checkpoints/starter'
-    assert final['widgets_values'][2] == 'h3_extension_checkpoints/clip'
-    assert final['widgets_values'][4] == 39
-    assert final['widgets_values'][5] == 39
+def test_controller_defaults_and_backend_links():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    c=next(n for n in nodes.values() if n['type']=='MiniMaxH3AVExtensionController')
+    assert c['widgets_values'] == ['Existing Video', 1, 8, 'All Active']
+    dest_types = {nodes[links[lid][3]]['type'] for lid in c['outputs'][0]['links']}
+    assert {'MiniMaxH3StartCanvasSelector','MiniMaxH3StartMaskedContext','MiniMaxH3StreamLiveExtensionAVToVHS'} <= dest_types
+    for cid in [103,201,301,401,501,601]:
+        lid=_input(nodes[cid],'audio_feather_ticks')['link']; l=links[lid]
+        assert l[1]==c['id'] and l[2]==2
 
 
-def test_one_global_start_switch_drives_context_canvas_and_assembler():
-    data = load()
-    nodes = {n['id']: n for n in data['nodes']}
-    mode = next(n for n in nodes.values() if n['type'] == 'MiniMaxH3ExtensionStartMode')
-    links = {l[0]: l for l in data['links']}
-    destinations = {(links[lid][3], nodes[links[lid][3]]['type']) for lid in mode['outputs'][0]['links']}
-    assert {t for _, t in destinations} == {
-        'MiniMaxH3StartCheckpointMaskedContext',
-        'MiniMaxH3StartCanvasSelector',
-        'MiniMaxH3AssembleStarterOrExtensionCheckpoints',
-    }
+def test_starter_is_reference_to_video_plus_frame1_keyframe():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    starter=nodes[973]
+    assert starter['type']=='MiniMaxH3ReferenceToVideo'
+    kf=nodes[1022]
+    assert kf['type']=='MiniMaxH3CustomKeyframes'
+    assert kf['widgets_values'][:2] == ['{"count":1,"positions":[1]}','1-based']
+    assert links[_input(kf,'conditioning')['link']][1] == starter['id']
+    assert links[_input(kf,'latent')['link']][1] == starter['id']
+    assert links[_input(kf,'keyframe_image_1')['link']][1] == 970
+    assert links[_input(nodes[975],'conditioning')['link']][1] == kf['id']
 
 
-def test_generated_starter_is_fl2va_checkpointed_and_optional_i2v():
-    data = load()
-    nodes = data['nodes']
-    starter_model = next(n for n in nodes if n['type'] == 'UNETLoader' and n['widgets_values'][0] == 'minimax_h3_fl2va_pruned_int8_convrot.safetensors')
-    assert starter_model['widgets_values'][0] == 'minimax_h3_fl2va_pruned_int8_convrot.safetensors'
-    starter = next(n for n in nodes if n['type'] == 'MiniMaxH3ImageToVideo')
-    first = next(n for n in nodes if n['type'] == 'MiniMaxH3OptionalStartFrame')
-    save = next(n for n in nodes if n.get('title') == 'CHECKPOINT — GENERATED STARTER (DISK / RESUME SAFE)')
-    assert starter['inputs'][2]['link'] is not None
-    assert isinstance(first['widgets_values'][0], bool)  # preserve workflow author's chosen T2V/I2V default
-    assert save['widgets_values'] == ['h3_extension_checkpoints/starter', 1]
+def test_reference_images_feed_every_reference_to_video_node_directly():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    ref_loaders={1020,1021}
+    assert all(nodes[i]['type']=='LoadImage' for i in ref_loaders)
+    for n in nodes.values():
+        if n['type']!='MiniMaxH3ReferenceToVideo': continue
+        l0=links[_input(n,'ref_images.ref_image_0')['link']]
+        l1=links[_input(n,'ref_images.ref_image_1')['link']]
+        assert l0[1]==1020 and l1[1]==1021
 
 
-def test_workflow_uses_default_titles_for_loaders_and_attention_patches():
-    data = load()
-    nodes = data['nodes']
-    loaders = [n for n in nodes if n['type'] == 'UNETLoader']
-    attention = [n for n in nodes if n['type'] in ('PathchSageAttentionKJ', 'ModelAttentionBackend')]
-    refs = [n for n in nodes if n['type'] == 'MiniMaxH3ReferenceToVideo']
-    assert len(loaders) == 2 and all(n.get('title') is None for n in loaders)
-    assert len(attention) == 2 and all(n.get('title') is None for n in attention)
-    assert sorted(n.get('title') for n in refs) == [
-        f'EXTENSION {i} — MiniMax H3 Reference to Video' for i in range(1, 7)
-    ]
+def test_optional_reference_audio_uses_one_reroute_per_slot_and_feeds_all_r2v():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    loaders=sorted(
+        [n for n in nodes.values() if n['type']=='LoadAudio' and n.get('title','').startswith('REFERENCE AUDIO ')],
+        key=lambda n:n['title'],
+    )
+    reroutes=sorted(
+        [n for n in nodes.values() if n['type']=='Reroute' and n.get('title','').startswith('REFERENCE AUDIO ')],
+        key=lambda n:n['title'],
+    )
+    assert len(loaders)==2 and len(reroutes)==2
+    assert all(n.get('mode')==4 for n in loaders)
+    assert all(n['widgets_values'][0]=='' for n in loaders)
+    for loader,reroute in zip(loaders,reroutes):
+        assert len(loader['outputs'][0]['links'])==1
+        lr=links[loader['outputs'][0]['links'][0]]
+        assert lr[3]==reroute['id']
+        assert len(reroute['outputs'][0]['links'])==7
+    for n in nodes.values():
+        if n['type']!='MiniMaxH3ReferenceToVideo': continue
+        for name in ('ref_audios.ref_audio_0','ref_audios.ref_audio_1'):
+            l=links[_input(n,name)['link']]
+            assert nodes[l[1]]['type']=='Reroute'
 
 
+def test_generated_chain_is_direct_live_latent_between_samplers():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    for ctx,prev in zip([201,301,401,501,601],[124,214,314,414,514]):
+        assert links[_input(nodes[ctx],'source_latent')['link']][1] == prev
+    final=next(n for n in nodes.values() if n['type']=='MiniMaxH3StreamLiveExtensionAVToVHS')
+    for i,sid in enumerate([124,214,314,414,514,614],1):
+        assert links[_input(final,f'extension_{i}')['link']][1] == sid
+    assert links[_input(final,'starter_latent')['link']][1] == 977
 
-def test_optional_extension_switch_defaults_to_one_active_group():
-    data = load()
-    nodes = data['nodes']
-    switch = next(n for n in nodes if n['type'] == 'Fast Groups Bypasser (rgthree)' and n.get('properties', {}).get('matchTitle') == 'OPTIONAL EXTENSION')
-    assert switch['title'] == 'OPTIONAL EXTENSIONS 2–6 — ENABLE SEQUENTIALLY'
 
-    groups = {g['id']: g for g in data.get('groups', [])}
-    assert [groups[i]['title'] for i in range(4, 9)] == [
-        f'OPTIONAL EXTENSION — EXTENSION {i - 2}' for i in range(4, 9)
-    ]
+def test_final_output_streams_directly_to_vhs_without_full_image_output():
+    data=load(); nodes=_nodes(data); links=_links(data)
+    final=next(n for n in nodes.values() if n['type']=='MiniMaxH3StreamLiveExtensionAVToVHS')
+    assert final['outputs'][0]['type']=='VHS_FILENAMES'
+    assert final['widgets_values_named']['save_output'] is True
+    assert final['widgets_values_named']['context_frames'] == 39
+    assert final['widgets_values_named']['video_overlap_frames'] == 39
+    assert not any(n.get('title')=='Final Output — VHS Video Combine' for n in nodes.values())
 
-    # Every generation/checkpoint node for Extensions 2–6 is bypassed by default.
-    optional_ids = set()
-    for n in nodes:
-        title = str(n.get('title') or '')
-        if any(title.startswith(prefix) for prefix in (
-            'EXTENSION 2', 'EXTENSION 3', 'EXTENSION 4', 'EXTENSION 5', 'EXTENSION 6',
-            'CHECKPOINT — Extension 2', 'CHECKPOINT — Extension 3', 'CHECKPOINT — Extension 4',
-            'CHECKPOINT — Extension 5', 'CHECKPOINT — Extension 6',
-        )):
-            optional_ids.add(n['id'])
-    # Include untitled sampler helper nodes by group bounding boxes, excluding the global optional-ref area.
-    for gid in range(4, 9):
-        x, y, w, h = groups[gid]['bounding']
-        for n in nodes:
-            px, py = n.get('pos', [10**9, 10**9])
-            if x <= px <= x + w and y <= py <= y + h:
-                optional_ids.add(n['id'])
-    optional_ids.discard(switch['id'])
-    assert optional_ids
-    assert all(next(n for n in nodes if n['id'] == nid).get('mode', 0) == 4 for nid in optional_ids)
 
-    refs = [n for n in nodes if n['type'] == 'MiniMaxH3OptionalReferenceImage']
-    assert all(n.get('mode', 0) == 0 for n in refs)
+def test_controller_managed_groups_have_single_ownership_and_matching_defaults():
+    data=load(); owners=defaultdict(list)
+    managed=[]
+    for g in data.get('groups',[]):
+        meta=(g.get('flags') or {}).get('h3_control')
+        if not meta: continue
+        b=g['bounding']; members=[]
+        for n in data['nodes']:
+            cx=n['pos'][0]+n['size'][0]/2; cy=n['pos'][1]+n['size'][1]/2
+            if b[0] <= cx <= b[0]+b[2] and b[1] <= cy <= b[1]+b[3]:
+                members.append(n); owners[n['id']].append(meta)
+        managed.append((meta,members))
+    assert not {nid:v for nid,v in owners.items() if len(v)>1}
+    assert sum(m['role']=='extension' for m,_ in managed)==6
+    assert sum(m['role']=='extension_preview' for m,_ in managed)==6
+    assert sum(m['role']=='starter_preview' for m,_ in managed)==1
+    assert sum(m['role']=='starter_core' for m,_ in managed)==1
+    assert sum(m['role']=='i2v_keyframe' for m,_ in managed)==1
+    assert sum(m['role']=='source_video' for m,_ in managed)==1
+    for meta,members in managed:
+        role=meta['role']; idx=meta.get('index')
+        enabled = role=='source_video' or (role=='extension' and idx==1) or (role=='extension_preview' and idx==1)
+        assert all(n.get('mode',0)==(0 if enabled else 4) for n in members)
+
 
 def test_workflow_links_are_internally_consistent():
-    data = load()
-    nodes = {n['id']: n for n in data['nodes']}
-    links = {l[0]: l for l in data['links']}
+    data=load(); nodes=_nodes(data); links=_links(data)
     for n in nodes.values():
-        for slot, inp in enumerate(n.get('inputs', [])):
-            lid = inp.get('link')
-            if lid is None:
-                continue
-            assert lid in links
-            link = links[lid]
-            assert link[3] == n['id'] and link[4] == slot
-        for slot, out in enumerate(n.get('outputs', [])):
+        for slot,inp in enumerate(n.get('inputs',[])):
+            lid=inp.get('link')
+            if lid is None: continue
+            assert lid in links and links[lid][3]==n['id'] and links[lid][4]==slot
+        for slot,out in enumerate(n.get('outputs',[])):
             for lid in out.get('links') or []:
-                assert lid in links
-                link = links[lid]
-                assert link[1] == n['id'] and link[2] == slot
+                assert lid in links and links[lid][1]==n['id'] and links[lid][2]==slot
 
 
-def test_start_mode_is_one_user_choice_and_controls_source_group():
-    data = load()
-    nodes = {n['id']: n for n in data['nodes']}
-    mode = next(n for n in nodes.values() if n['type'] == 'MiniMaxH3ExtensionStartMode')
-    assert mode['widgets_values'][0] in ('start with T2V/I2V', 'Start from existing video')
-
-    # No second source-mode Fast Groups Bypasser remains in the workflow.
-    assert not any(
-        n['type'] == 'Fast Groups Bypasser (rgthree)'
-        and str(n.get('title', '')).startswith('SOURCE VIDEO BRANCH')
-        for n in nodes.values()
-    )
-
-    source_groups = [g for g in data.get('groups', []) if str(g.get('title', '')).startswith('START SOURCE VIDEO')]
-    assert len(source_groups) == 1
-    source_group = source_groups[0]
-
-    # VHS loader + crop live inside the source group; no hidden per-node gate metadata remains.
-    gx, gy, gw, gh = source_group['bounding']
-    for nid in (99, 100):
-        n = nodes[nid]
-        x, y = n['pos']
-        assert gx <= x <= gx + gw and gy <= y <= gy + gh
-        assert 'h3_start_branch_gate' not in n.get('properties', {})
-        assert 'h3_start_active_mode' not in n.get('properties', {})
-
-    frontend = (ROOT / 'js' / 'h3_extension_start_mode.js').read_text()
-    assert 'START_T2V_I2V = "start with T2V/I2V"' in frontend
-    assert 'SOURCE_GROUP_PREFIX = "START SOURCE VIDEO"' in frontend
-    assert 'MODE_BYPASS = 4' in frontend
-    assert 'candidate.mode = desiredMode' in frontend
-
-
-def test_start_mode_user_labels_map_to_internal_modes():
-    source = (ROOT / 'nodes.py').read_text()
-    assert 'START_T2V_I2V = "start with T2V/I2V"' in source
-    assert 'START_EXISTING_VIDEO = "Start from existing video"' in source
-    assert 'return ("generate_starter",)' in source
-    assert 'return ("load_video",)' in source
-
-
-def test_extension_chain_is_disk_backed_between_samplers_and_vhs_previews():
-    data = load()
-    nodes = {n['id']: n for n in data['nodes']}
-    links = {l[0]: l for l in data['links']}
-    saves = [n for n in nodes.values() if n['type'] == 'MiniMaxH3CheckpointSavePath']
-    assert len(saves) == 7
-    assert all(len(n['outputs']) == 1 and n['outputs'][0]['type'] == 'STRING' for n in saves)
-
-    resumes = [n for n in nodes.values() if n['type'] == 'MiniMaxH3ResumeCheckpointLatent']
-    assert len(resumes) == 5
-    for n in resumes:
-        signal = next(i for i in n['inputs'] if i['name'] == 'checkpoint_signal')
-        link = links[signal['link']]
-        assert nodes[link[1]]['type'] == 'MiniMaxH3CheckpointSavePath'
-        assert link[5] == 'STRING'
-
-    start = next(n for n in nodes.values() if n['type'] == 'MiniMaxH3StartCheckpointMaskedContext')
-    starter_signal = next(i for i in start['inputs'] if i['name'] == 'starter_checkpoint_signal')
-    assert nodes[links[starter_signal['link']][1]]['type'] == 'MiniMaxH3CheckpointSavePath'
-
-    loaders = [n for n in nodes.values() if n['type'] == 'MiniMaxH3CheckpointLoadPath']
-    assert len(loaders) == 7
-    for n in loaders:
-        link = links[n['inputs'][0]['link']]
-        assert nodes[link[1]]['type'] == 'MiniMaxH3CheckpointSavePath'
-        assert link[5] == 'STRING'
+def test_controller_frontend_uses_real_bypass_and_metadata_groups():
+    src=(ROOT/'js'/'h3_av_extension_controller.js').read_text()
+    assert 'MODE_BYPASS = 4' in src
+    assert 'group.recomputeInsideNodes' in src
+    assert 'group?.flags?.h3_control' in src
+    assert 'beforeQueued' in src
+    assert 'afterConfigureGraph' in src
+    assert 'setInterval' in src
+    assert 'nativeWouldSkip' in src
+    assert 'this.updateParameters(params, true)' in src
+    assert '.updateSource(' not in src
+    assert 'app.canvas?.isDragging' in src
+    assert 'expected exactly one H3 AV Extension Controller' in src
+    assert 'unsupported h3_control schema' in src
+    assert 'belongs to multiple H3-controlled groups' in src

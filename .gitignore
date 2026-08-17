@@ -3,3 +3,5 @@ __pycache__/
 *.bak
 .DS_Store
 h3_context/
+
+.pytest_cache/

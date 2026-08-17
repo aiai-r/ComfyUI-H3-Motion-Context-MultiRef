@@ -47,25 +47,14 @@ from .existing_video_extension import (
     MiniMaxH3ExistingVideoMaskedContext,
     MiniMaxH3GeneratedAVMaskedContext,
     MiniMaxH3StartMaskedContext,
-    MiniMaxH3StartCheckpointMaskedContext,
     MiniMaxH3AssembleExtension,
 )
 from .h3_masked_bridge import MiniMaxH3MaskedAVBridge
 from .h3_song_audio_context import MiniMaxH3SongMaskedAVContext
-from .h3_checkpoint_resume import (
-    MiniMaxH3CheckpointSave,
-    MiniMaxH3CheckpointSavePath,
-    MiniMaxH3CheckpointLoadPath,
-    MiniMaxH3CheckpointTailFrames,
-    MiniMaxH3ResumeCheckpointLatent,
-    MiniMaxH3CheckpointLoad,
-    MiniMaxH3ResumeTailFrames,
-    MiniMaxH3ResumeOrLiveLatent,
-    MiniMaxH3CheckpointTrigger,
-    MiniMaxH3AssembleCheckpoints,
-    MiniMaxH3AssembleExtensionCheckpoints,
-    MiniMaxH3AssembleStarterOrExtensionCheckpoints,
-    MiniMaxH3PreviewCheckpointVideo,
+from .h3_streaming_vhs import (
+    MiniMaxH3StreamLiveExtensionAVToVHS,
+    MiniMaxH3StreamLiveMusicVideoToVHS,
+    MiniMaxH3FinalizeVHSOutput,
 )
 from .h3_auto_crop32 import MiniMaxH3CropTo32, MiniMaxH3StartCanvasSelector
 from .h3_timing import crossfade_plan
@@ -990,6 +979,102 @@ class MiniMaxH3CustomKeyframes:
         return (out,)
 
 
+class MiniMaxH3MusicVideoController:
+    """Single source of truth for the checkpoint-free H3 Music Video workflow."""
+
+    PREVIEW_OFF = "Off"
+    PREVIEW_LAST = "Last Active"
+    PREVIEW_ALL = "All Active"
+    MAX_CLIPS = 20
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "active_clips": ("INT", {
+                    "default": 1, "min": 1, "max": cls.MAX_CLIPS, "step": 1,
+                    "tooltip": "Generate Clip 1 through Clip N. Later clip groups are automatically and visibly bypassed.",
+                }),
+                "previews": ([cls.PREVIEW_OFF, cls.PREVIEW_LAST, cls.PREVIEW_ALL], {
+                    "default": cls.PREVIEW_ALL,
+                    "tooltip": "Off disables all clip previews. Last Active previews only the final enabled clip. All Active previews every enabled clip.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "STRING")
+    RETURN_NAMES = ("active_clips", "preview_mode")
+    FUNCTION = "select"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Workflow controller for the checkpoint-free H3 Music Video example. "
+        "Its frontend companion applies real ComfyUI bypass mode to tagged clip/preview groups; "
+        "the backend active_clips output drives the lazy final streaming path."
+    )
+
+    def select(self, active_clips=1, previews=PREVIEW_ALL):
+        return (
+            max(1, min(self.MAX_CLIPS, int(active_clips))),
+            str(previews),
+        )
+
+
+class MiniMaxH3AVExtensionController:
+    """Single source of truth for the AV Extension example workflow."""
+
+    START_EXISTING = "Existing Video"
+    START_T2V = "T2V"
+    START_I2V = "I2V / Custom Keyframes"
+    PREVIEW_OFF = "Off"
+    PREVIEW_LAST = "Last Active"
+    PREVIEW_ALL = "All Active"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start": ([cls.START_EXISTING, cls.START_T2V, cls.START_I2V], {
+                    "default": cls.START_EXISTING,
+                    "tooltip": "Existing Video loads/extends a source clip. T2V generates a Ref2VA starter without a keyframe. I2V / Custom Keyframes enables the starter keyframe image at frame 1 (resolved frame index 0).",
+                }),
+                "active_extensions": ("INT", {
+                    "default": 1, "min": 1, "max": 6, "step": 1,
+                    "tooltip": "Generate Extensions 1..N. Later extension groups are automatically and visibly bypassed.",
+                }),
+                "audio_feather_ticks": ("INT", {
+                    "default": 8, "min": 0, "max": 256, "step": 1,
+                    "tooltip": "Audio latent-mask half-cosine feather. H3 audio latent rate is 40 Hz; 8 ticks = 0.2 seconds. 0 restores a hard audio mask.",
+                }),
+                "previews": ([cls.PREVIEW_OFF, cls.PREVIEW_LAST, cls.PREVIEW_ALL], {
+                    "default": cls.PREVIEW_ALL,
+                    "tooltip": "Off disables all intermediate VHS previews. Last Active previews only the final enabled extension. All Active previews every enabled extension and the generated starter when applicable.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "INT", "STRING")
+    RETURN_NAMES = ("start_mode", "active_extensions", "audio_feather_ticks", "preview_mode")
+    FUNCTION = "select"
+    CATEGORY = "conditioning/minimax"
+    DESCRIPTION = (
+        "Workflow controller for the H3 AV Extension example. Its frontend companion applies real ComfyUI bypass mode to tagged groups; backend outputs drive lazy routing and the final streaming path."
+    )
+
+    def select(self, start=START_EXISTING, active_extensions=1, audio_feather_ticks=8, previews=PREVIEW_ALL):
+        if str(start) == self.START_T2V:
+            mode = "t2v"
+        elif str(start) == self.START_I2V:
+            mode = "i2v"
+        else:
+            mode = "existing_video"
+        return (
+            mode,
+            max(1, min(6, int(active_extensions))),
+            max(0, int(audio_feather_ticks)),
+            str(previews),
+        )
+
+
 class MiniMaxH3ExtensionStartMode:
     """Single workflow switch for the masked AV extension chain start source."""
 
@@ -1014,7 +1099,7 @@ class MiniMaxH3ExtensionStartMode:
     DESCRIPTION = (
         "One global switch for the masked AV extension workflow. The user-facing "
         "choice is mapped to the internal load_video/generate_starter mode used "
-        "by the H3 context, canvas, and checkpoint assembler nodes."
+        "by the H3 context, canvas, and final-output nodes."
     )
 
     def select(self, mode=START_EXISTING_VIDEO):
@@ -1105,26 +1190,17 @@ NODE_CLASS_MAPPINGS = {
     "MiniMaxH3ExistingVideoMaskedContext": MiniMaxH3ExistingVideoMaskedContext,
     "MiniMaxH3GeneratedAVMaskedContext": MiniMaxH3GeneratedAVMaskedContext,
     "MiniMaxH3StartMaskedContext": MiniMaxH3StartMaskedContext,
-    "MiniMaxH3StartCheckpointMaskedContext": MiniMaxH3StartCheckpointMaskedContext,
     "MiniMaxH3MaskedAVBridge": MiniMaxH3MaskedAVBridge,
     "MiniMaxH3SongMaskedAVContext": MiniMaxH3SongMaskedAVContext,
-    "MiniMaxH3CheckpointSave": MiniMaxH3CheckpointSave,
-    "MiniMaxH3CheckpointSavePath": MiniMaxH3CheckpointSavePath,
-    "MiniMaxH3CheckpointLoadPath": MiniMaxH3CheckpointLoadPath,
-    "MiniMaxH3CheckpointTailFrames": MiniMaxH3CheckpointTailFrames,
-    "MiniMaxH3ResumeCheckpointLatent": MiniMaxH3ResumeCheckpointLatent,
-    "MiniMaxH3CheckpointLoad": MiniMaxH3CheckpointLoad,
-    "MiniMaxH3ResumeTailFrames": MiniMaxH3ResumeTailFrames,
-    "MiniMaxH3ResumeOrLiveLatent": MiniMaxH3ResumeOrLiveLatent,
-    "MiniMaxH3CheckpointTrigger": MiniMaxH3CheckpointTrigger,
-    "MiniMaxH3AssembleCheckpoints": MiniMaxH3AssembleCheckpoints,
-    "MiniMaxH3AssembleExtensionCheckpoints": MiniMaxH3AssembleExtensionCheckpoints,
-    "MiniMaxH3AssembleStarterOrExtensionCheckpoints": MiniMaxH3AssembleStarterOrExtensionCheckpoints,
-    "MiniMaxH3PreviewCheckpointVideo": MiniMaxH3PreviewCheckpointVideo,
     "MiniMaxH3AssembleExtension": MiniMaxH3AssembleExtension,
+    "MiniMaxH3StreamLiveExtensionAVToVHS": MiniMaxH3StreamLiveExtensionAVToVHS,
+    "MiniMaxH3StreamLiveMusicVideoToVHS": MiniMaxH3StreamLiveMusicVideoToVHS,
+    "MiniMaxH3FinalizeVHSOutput": MiniMaxH3FinalizeVHSOutput,
     "MiniMaxH3CropTo32": MiniMaxH3CropTo32,
     "MiniMaxH3StartCanvasSelector": MiniMaxH3StartCanvasSelector,
     "MiniMaxH3OptionalReferenceImage": MiniMaxH3OptionalReferenceImage,
+    "MiniMaxH3AVExtensionController": MiniMaxH3AVExtensionController,
+    "MiniMaxH3MusicVideoController": MiniMaxH3MusicVideoController,
     "MiniMaxH3ExtensionStartMode": MiniMaxH3ExtensionStartMode,
     "MiniMaxH3OptionalStartFrame": MiniMaxH3OptionalStartFrame,
 }
@@ -1139,23 +1215,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3StartMaskedContext": "H3 Start Masked Context",
     "MiniMaxH3MaskedAVBridge": "H3 Masked AV Bridge",
     "MiniMaxH3SongMaskedAVContext": "H3 Song Audio + Masked Video Context",
-    "MiniMaxH3CheckpointSave": "H3 Checkpoint Save",
-    "MiniMaxH3CheckpointSavePath": "H3 Persistent Checkpoint Gate",
-    "MiniMaxH3CheckpointLoadPath": "H3 Checkpoint Load Path",
-    "MiniMaxH3CheckpointTailFrames": "H3 Checkpoint Tail Frames",
-    "MiniMaxH3ResumeCheckpointLatent": "H3 Resume / Saved AV Latent",
-    "MiniMaxH3CheckpointLoad": "H3 Checkpoint Load",
-    "MiniMaxH3ResumeTailFrames": "H3 Resume / Live Tail Frames",
-    "MiniMaxH3ResumeOrLiveLatent": "H3 Resume / Live AV Latent",
-    "MiniMaxH3CheckpointTrigger": "H3 Checkpoint Final Trigger",
-    "MiniMaxH3AssembleCheckpoints": "H3 Assemble Checkpoints",
-    "MiniMaxH3AssembleExtensionCheckpoints": "H3 Assemble Extension Checkpoints",
-    "MiniMaxH3AssembleStarterOrExtensionCheckpoints": "H3 Assemble Starter + Extension Checkpoints",
-    "MiniMaxH3PreviewCheckpointVideo": "H3 Preview Checkpoint Video",
     "MiniMaxH3AssembleExtension": "H3 Assemble Existing Video Extension",
+    "MiniMaxH3StreamLiveExtensionAVToVHS": "H3 Stream Final AV Extension to VHS",
+    "MiniMaxH3StreamLiveMusicVideoToVHS": "H3 Stream Final Music Video to VHS",
+    "MiniMaxH3FinalizeVHSOutput": "H3 Final Stream Output Sink",
     "MiniMaxH3CropTo32": "H3 Crop Source To /32",
     "MiniMaxH3StartCanvasSelector": "H3 Start Canvas Selector",
     "MiniMaxH3OptionalReferenceImage": "H3 Optional Reference Image",
+    "MiniMaxH3AVExtensionController": "H3 AV Extension Controller",
+    "MiniMaxH3MusicVideoController": "H3 Music Video Controller",
     "MiniMaxH3ExtensionStartMode": "H3 Extension Start Mode",
     "MiniMaxH3OptionalStartFrame": "H3 Optional Starter First Frame",
 }

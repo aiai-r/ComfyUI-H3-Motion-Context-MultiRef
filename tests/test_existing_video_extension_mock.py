@@ -98,13 +98,29 @@ class VideoVAE:
         h, w = frames.shape[1], frames.shape[2]
         return torch.ones((1, 24, t, h // 16, w // 16), dtype=torch.float32) * 0.25
 
+    def decode(self, latent):
+        # Keep the mock small while preserving H3 temporal geometry.  The
+        # latent mean lets the live-assembler test distinguish clips.
+        n = module._pixel_frames(int(latent.shape[2]))
+        h, w = int(latent.shape[3]) * 16, int(latent.shape[4]) * 16
+        value = float(latent.mean())
+        return torch.full((n, h, w, 3), value, dtype=torch.float32)
+
 
 class AudioVAE:
     audio_sample_rate = 32000
+    audio_sample_rate_output = 32000
 
     def encode(self, x):
         t = round(x.shape[1] / 32000 * 40)
         return torch.ones((1, 32, 2, t), dtype=torch.float32) * 0.5
+
+    def decode(self, latent):
+        # H3 audio latents run at 40 Hz.  Return a stereo waveform long enough
+        # for exact frame-timeline fitting in the live assembler.
+        samples = round(int(latent.shape[-1]) / 40 * self.audio_sample_rate_output)
+        value = float(latent.mean())
+        return torch.full((1, samples, 2), value, dtype=torch.float32)
 
 
 def test_39_frame_prefix_and_exact_assembly():
@@ -129,6 +145,7 @@ def test_39_frame_prefix_and_exact_assembly():
         24.0,
         39,
         "disabled",
+        0,
     )
 
     assert n == 39
@@ -174,7 +191,7 @@ def test_generated_latent_av_context_copies_tail_without_reencode():
     target = {"samples": NestedTensor((dst_video, dst_audio))}
 
     node = module.MiniMaxH3GeneratedAVMaskedContext()
-    out, n = node.prepare(target, source, 39)
+    out, n = node.prepare(target, source, 39, 0)
     assert n == 39
     ov, oa = out["samples"].unbind()
     vm, am = out["noise_mask"].unbind()
@@ -188,17 +205,49 @@ def test_generated_latent_av_context_copies_tail_without_reencode():
     assert am[..., :65].max() == 0 and am[..., 65:].min() == 1
 
 
+def test_av_context_snaps_to_shared_video_audio_boundaries():
+    src_video = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).repeat(1, 24, 1, 2, 4)
+    src_audio = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).repeat(1, 32, 2, 1)
+    source = {"samples": NestedTensor((src_video, src_audio))}
+    dst_video = torch.zeros((1, 24, 42, 2, 4))
+    dst_audio = torch.zeros((1, 32, 2, 235))
+    target = {"samples": NestedTensor((dst_video, dst_audio))}
+
+    node = module.MiniMaxH3GeneratedAVMaskedContext()
+    _out, n = node.prepare(target, source, 73, 0)
+    assert n == 39
+
+    # A 90-frame shared AV boundary stays 90 when both source and target permit it.
+    _out, n = node.prepare(target, source, 90, 0)
+    assert n == 90
+
+
+def test_audio_feather_uses_half_cosine_without_changing_context_length():
+    video = torch.zeros((1, 24, 42, 2, 4))
+    audio = torch.zeros((1, 32, 2, 235))
+    latent = {"samples": NestedTensor((video, audio))}
+    source_frames = torch.rand((120, 32, 64, 3))
+    source_audio = {"waveform": torch.rand((1, 2, 160000)), "sample_rate": 32000}
+    out, n = module.MiniMaxH3ExistingVideoMaskedContext().prepare(
+        latent, VideoVAE(), AudioVAE(), source_frames, source_audio,
+        24.0, 39, "disabled", 8,
+    )
+    assert n == 39
+    _vm, am = out["noise_mask"].unbind()
+    assert torch.count_nonzero(am[..., :57]) == 0
+    expected = torch.tensor([0.0380602, 0.1464466, 0.3086583, 0.5, 0.6913417, 0.8535534, 0.9619398, 1.0])
+    assert torch.allclose(am[0, 0, 0, 57:65], expected, atol=1e-5)
+    assert am[..., 65:].min() == 1
+
+
 def test_start_masked_context_lazy_start_modes_and_live_starter():
     node = module.MiniMaxH3StartMaskedContext()
     assert node.check_lazy_status(
-        None, None, None, 'load_video', 39, 0, 'starter', 24.0, 'disabled'
+        None, None, None, 'existing_video', 39, 8, 24.0, 'disabled'
     ) == ['source_frames', 'source_audio']
     assert node.check_lazy_status(
-        None, None, None, 'generate_starter', 39, 0, 'starter', 24.0, 'disabled'
+        None, None, None, 't2v', 39, 8, 24.0, 'disabled'
     ) == ['live_starter_latent']
-    assert node.check_lazy_status(
-        None, None, None, 'generate_starter', 39, 1, 'starter', 24.0, 'disabled'
-    ) == []
 
     src_video = torch.arange(42, dtype=torch.float32).view(1, 1, 42, 1, 1).repeat(1, 24, 1, 2, 4)
     src_audio = torch.arange(235, dtype=torch.float32).view(1, 1, 1, 235).repeat(1, 32, 2, 1)
@@ -208,10 +257,38 @@ def test_start_masked_context_lazy_start_modes_and_live_starter():
     target = {'samples': NestedTensor((dst_video, dst_audio))}
 
     out, n = node.prepare(
-        target, None, None, 'generate_starter', 39, 0, 'starter', 24.0,
+        target, None, None, 't2v', 39, 0, 24.0,
         'disabled', live_starter_latent=starter,
     )
     ov, oa = out['samples'].unbind()
     assert n == 39
     assert torch.equal(ov[:, :, :12], src_video[:, :, -12:])
     assert torch.equal(oa[..., :65], src_audio[..., -65:])
+
+
+def test_small_decoded_audio_undershoot_is_time_conformed_without_silence_padding():
+    # Use non-zero audio so an appended silence tail would be immediately visible.
+    wave = torch.linspace(0.25, 1.0, 482400, dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    out = module._conform_waveform_length(wave, 482667, "test clip")
+    assert out.shape == (1, 2, 482667)
+    assert torch.count_nonzero(out[..., -32:]) == out[..., -32:].numel()
+    assert float(out[..., -1].mean()) > 0.9
+
+
+def test_real_h3_audio_undershoot_lengths_conform_exactly_without_zero_tail():
+    # Exact lengths observed in the 362-frame Update-6 AV extension runs.
+    source = torch.linspace(0.2, 1.0, 664908, dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    for want in (665174, 665175, 665176):
+        out = module._conform_waveform_length(source, want, f"real H3 {want}")
+        assert out.shape[-1] == want
+        assert torch.count_nonzero(out[..., -32:]) == out[..., -32:].numel()
+
+
+def test_audio_timebase_conform_rejects_large_duration_mismatch():
+    wave = torch.ones((1, 2, 1000), dtype=torch.float32)
+    try:
+        module._conform_waveform_length(wave, 1200, "bad clip")
+    except ValueError as exc:
+        assert "too large for AV timebase conformance" in str(exc)
+    else:
+        raise AssertionError("large audio duration mismatches must not be silently stretched")

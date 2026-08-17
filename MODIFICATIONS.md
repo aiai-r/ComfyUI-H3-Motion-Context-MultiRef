@@ -80,7 +80,7 @@ Typical latent-mask semantics are:
 - `0` = preserve known content;
 - `1` = denoise/generate new content.
 
-This became the foundation for the current `NEW - Latent Masking` workflow family.
+This became the foundation for the later latent-masking workflow family.
 
 ---
 
@@ -111,15 +111,15 @@ Update 4 established the exact master-song latent-masking path that the current 
 - Reworked long-form continuation so later clips and preview branches load saved checkpoint paths instead of depending on large cached latent tensors from earlier samplers.
 - Added RAM-safe sequential final assembly that decodes one saved clip at a time, preserves **linear visual overlap blending at every seam**, and streams the result to ffmpeg.
 - Added per-clip video previews and direct in-node preview of the already-written final MP4 without decoding the complete movie back into one giant `IMAGE` batch.
-- Added the current multi-clip AV Extension workflow, which can either extend an existing video or generate a new T2V/I2V starter clip and then continue extending it.
-- Expanded the current master-song music-video workflow to a 20-slot checkpoint/resume architecture and shipped it preconfigured with the bundled six-clip reproducible demo.
+- Added a multi-clip AV Extension workflow that could either extend an existing video or generate a new T2V/I2V starter clip and then continue extending it.
+- Expanded the master-song music-video workflow to a 20-slot checkpoint/resume architecture and shipped it preconfigured with the bundled six-clip reproducible demo.
 - Fixed the master-song 40 Hz audio-grid boundary case where an exact picture-duration encode can be one latent token short.
 - Reworked native H3 compatibility detection for Issue #7 so compatibility is checked behaviorally instead of by brittle source-string inspection.
 - Consolidated and renamed example workflows, removed obsolete validation/demo duplicates, and moved workflow guidance into one `example_workflows/README.md` plus notes embedded directly in the workflows.
 
 ### 1. Persistent checkpoint gates and selective regeneration
 
-The long-form workflows now use **persistent checkpoint gates** at clip boundaries.
+The Update-5 long-form workflows used **persistent checkpoint gates** at clip boundaries.
 
 Each completed H3 video/audio latent is saved to a fixed safetensors checkpoint together with a SHA-256 generation signature derived from the submitted graph that produced that clip. Before requesting the sampler again, the gate compares the current generation signature with the saved checkpoint:
 
@@ -134,7 +134,7 @@ The disk-backed path nodes also separate the small cached checkpoint-path string
 
 ### 2. Crash-safe resume and checkpointed continuation
 
-Update 5 adds checkpoint/resume helpers for long H3 chains, including:
+Update 5 added checkpoint/resume helpers for long H3 chains, including:
 
 - **H3 Persistent Checkpoint Gate**;
 - **H3 Checkpoint Load Path**;
@@ -164,11 +164,11 @@ Instead of repeatedly concatenating decoded `IMAGE` tensors into an ever-growing
 
 This removes the cumulative decoded-image pattern that caused extremely large host-RAM usage in long chains.
 
-The current long-form workflows also include clip-local VHS previews. The complete assembled MP4 is previewed directly from the encoded file through ComfyUI's native video-preview UI, so a full-movie `IMAGE` tensor is not recreated just for viewing.
+The Update-5 long-form workflows also included clip-local VHS previews. The complete assembled MP4 is previewed directly from the encoded file through ComfyUI's native video-preview UI, so a full-movie `IMAGE` tensor is not recreated just for viewing.
 
-### 4. Current music-video workflow
+### 4. Update-5 music-video workflow
 
-The single current music-video example is:
+The Update-5 music-video example was:
 
 **`NEW - Latent Masking - Music Video - Lip-Sync + Reference images.json`**
 
@@ -186,9 +186,9 @@ The shipped default reproduces the bundled six-clip demo using the included refe
 
 The full Director Prompt and exact audible-word alignment instructions are embedded in the large note at the top of the workflow itself. The director instructions require alignment to the **actual audible words in each calculated song slice**, rather than estimating lyric timing from transcript order or line count.
 
-### 5. Current multi-clip AV Extension workflow
+### 5. Update-5 multi-clip AV Extension workflow
 
-The recommended multi-clip extension example is:
+The Update-5 multi-clip extension example was:
 
 **`NEW - Latent Masking - AV Extension - Multiple Clips + Reference Images.json`**
 
@@ -239,13 +239,73 @@ This avoids false failures after compatible ComfyUI refactors and improves coexi
 
 The example folder was simplified around clear architecture labels:
 
-- **`NEW - Latent Masking - ...`** — current/recommended latent-masking workflows;
+- **`NEW - Latent Masking - ...`** — the then-current latent-masking workflows;
 - **`OLD - Motion Context - ...`** — legacy guide-conditioning examples;
 - **`OLD - Hybrid - ...`** — mixed architectures retained for existing projects/experimentation;
 - **`UTILITY - ...`** — helper/example graphs.
 
 `OLD` means legacy architecture, not broken or unsupported.
 
-Obsolete validation workflows, duplicate music-video examples, and per-workflow sidecar READMEs were removed. All workflow guidance now lives in **`example_workflows/README.md`** and in notes embedded directly inside the relevant workflow JSON files.
+Obsolete validation workflows, duplicate music-video examples, and per-workflow sidecar READMEs were removed. Workflow guidance was consolidated into **`example_workflows/README.md`** and notes embedded directly inside the relevant workflow JSON files.
 
 For low-level H3 timing, masking, checkpoint/signature behavior, compatibility probing, and streamed assembly details, see [TECHNICAL_ARCHITECTURE.md](TECHNICAL_ARCHITECTURE.md).
+
+---
+
+## Update 6 — Long-form workflow rebuild, exact AV timing, and direct VHS streaming — 2026-08-17
+
+The current `NEW - Music Video.json` restores the repository's reproducible six-clip bundled demo defaults: the two CC0 reference images, `I'll Know You by the Scar.wav`, authored Clip 1–6 prompts, fixed seeds, Ref2VA model selection, 1 MP 16:9 resolution, 15-second raw target, 8-step turbo setup, and six active clips.
+
+### Main changes
+
+- Rebuilt both current long-form workflows as **checkpoint-free direct-latent chains**.
+- Renamed the two primary examples to **`NEW - AV Extension.json`** and **`NEW - Music Video.json`**, with utility and legacy examples moved under short `UTILITY -` / `OLD -` names.
+- Removed `h3_checkpoint_resume.py` and the obsolete Update-5 checkpoint/resume registrations.
+- Added controller-owned real ComfyUI bypass mode for AV Extension and Music Video generation/preview groups; neither current workflow requires rgthree for group control.
+- Added direct single-pass final-output nodes that call VideoHelperSuite internally and do **not** materialize one complete final ComfyUI `IMAGE` movie tensor.
+- Removed the superseded development-only live assemblers that returned a materialized full final `IMAGE` movie, so the known high-RAM path is not exposed as an alternative Update-6 node.
+- Added a targeted VHS same-result inline-preview refresh for controller-managed preview groups.
+- Added exact decoded-audio timebase conformance for small H3 audio-grid duration undershoots, replacing the previous silence-tail fallback at normal extension joins.
+- Extended CPU/static regressions for live chains, controller ownership, workflow link integrity, direct-stream final wiring, exact AV boundaries, absolute PCM seam accounting, decoded-audio conformance, and exact master-song slice endpoints.
+
+### AV Extension
+
+- `Existing Video`, `T2V`, and `I2V / Custom Keyframes` share one controller and one live extension chain.
+- T2V/I2V use `MiniMaxH3ReferenceToVideo`; I2V adds `H3 Custom Keyframes` at UI frame 1 / internal frame 0.
+- Two image-reference slots feed the starter and all six extensions.
+- Two optional audio-reference loaders feed the starter and all six extensions through one reroute per reference; both are bypassed by default.
+- Generated clips pass their H3 AV latents directly into the next masked-context node.
+- Audio masking keeps a hard preserved region plus a configurable half-cosine feather; the example defaults to 8 audio-latent ticks (0.2 s). Video masking remains hard.
+- Protected AV context snaps to shared H3 video/audio boundaries `39 / 90 / 141 / 192 / ...`, rather than accepting video-only H3 runs that end between 40 Hz audio ticks.
+- Final decoded-audio stitching removes duplicated context using **absolute timeline sample boundaries**. This avoids one-sample seam drift at rates such as 44.1 kHz.
+- When H3 audio decode is only a few hundred samples short of the exact frame-derived clip duration, the whole decoded clip is time-conformed by the tiny required ratio **before** the duplicated context is cut. Normal grid undershoot no longer inserts a zero/silence tail at every extension.
+- The public workflow now ends at `H3 Stream Final AV Extension to VHS`. It decodes one generated clip at a time, keeps only the effective visual seam tail, streams completed frames directly into VHS, and assembles exact AV audio without allocating the old full final RGB movie tensor.
+
+### Music Video
+
+- The 20-slot Music Video workflow starts from a generated `MiniMaxH3ReferenceToVideo` clip and continues by passing each sampler's **video latent tail directly** to the next clip.
+- The original master song remains authoritative: each clip receives the exact absolute master-song slice in its H3 audio latent with audio mask `0`, while final output receives the original master waveform unchanged.
+- Song-slice endpoints are derived from **absolute timeline sample boundaries**, avoiding one-sample errors from independently rounded slice durations.
+- The Director Prompt mirrors the workflow's timing math: requested seconds are quantized to 24-fps frames, snapped upward to the H3 `17k+5` frame grid, and each clip window is calculated from integer frame positions before converting to seconds.
+- The final output does **not** trim generated picture to the master-song duration by default.
+- Four global image-reference slots feed all 20 Ref2VA nodes; References 3 and 4 are bypassed by default.
+- One Music Video controller owns Active Clips 1–20 and preview policy, plus one global KSampler selection and one global scheduler.
+- `H3 Stream Final Music Video to VHS` decodes one live clip at a time, keeps only the local visual seam tail, streams frames directly into VHS, and passes the untouched master song to the final encode. The workflow connects its `VHS_FILENAMES` result to `H3 Final Stream Output Sink`; this keeps the streamer executable without giving its all-clips dependency chain the same output priority as the per-clip preview branches.
+
+### Inline preview refresh
+
+The current workflows keep ordinary VideoHelperSuite clip-preview nodes. VHS can overwrite a temp preview using the same filename/type/format as the previous result; its frontend may then treat the result as unchanged and leave the inline player stale/hidden even though `Open preview` reads the new complete file.
+
+For H3-controller-managed preview groups, the frontend detects that exact same-result condition. After VHS's normal execution handler runs, it invalidates only the stored filename and invokes VHS's own forced `updateParameters(..., true)` path once. It does not directly force repeated video-source reloads.
+
+### RAM/caching note
+
+Direct final streaming removes the large full-movie RGB allocation from the public workflows. ComfyUI's own intermediate-result cache can still retain large latent outputs. Cache policy remains a ComfyUI startup/runtime choice and is not embedded in the workflow JSON.
+
+### PR #15375 forward compatibility
+
+ComfyUI PR #15375 changed its native H3 mask integration on 2026-08-15: mask-grid alignment moved from the earlier `process_denoise_mask` hook into `scale_latent_inpaint`, and the preprocessing hook was removed. Update 6 now recognizes both the earlier and current PR layouts. If the current PR architecture lands in ComfyUI, the local fallback self-retires instead of reinstalling the obsolete preprocessing hook. Fractional audio-mask values used by the 8-tick feather remain supported by the current PR design.
+
+### Compatibility note
+
+Update-5 disk-checkpoint long-form nodes are no longer registered in Update 6. Saved workflows containing those historical checkpoint nodes must be migrated to the current direct-latent workflows.

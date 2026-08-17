@@ -101,7 +101,7 @@ class MiniMaxH3StartCanvasSelector:
         return "h3-start-canvas-selector-v2"
 
     def check_lazy_status(self, start_mode, generated_width, generated_height, source_width=None, source_height=None):
-        if str(start_mode) == "load_video":
+        if str(start_mode) in {"load_video", "existing_video"}:
             needed = []
             if source_width is None:
                 needed.append("source_width")
@@ -110,9 +110,9 @@ class MiniMaxH3StartCanvasSelector:
             return needed
         return []
 
-    def select(self, start_mode="load_video", generated_width=960, generated_height=544, source_width=None, source_height=None):
-        if str(start_mode) == "load_video":
+    def select(self, start_mode="existing_video", generated_width=960, generated_height=544, source_width=None, source_height=None):
+        if str(start_mode) in {"load_video", "existing_video"}:
             if source_width is None or source_height is None:
-                raise ValueError("H3 Start Canvas Selector: load_video mode needs source_width and source_height")
+                raise ValueError("H3 Start Canvas Selector: existing-video mode needs source_width and source_height")
             return (int(source_width), int(source_height))
         return (int(generated_width), int(generated_height))

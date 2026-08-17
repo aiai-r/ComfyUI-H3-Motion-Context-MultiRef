@@ -1,8 +1,8 @@
-"""Run repo CPU/static regressions without importing the ComfyUI plugin package.
+"""Run the repository CPU/static regressions without a ComfyUI installation.
 
-ComfyUI custom-node roots contain ``__init__.py`` that expects to be imported by
-ComfyUI. Plain pytest package discovery tries to import that file before the test
-mocks exist. This runner loads the test modules directly by file path instead.
+Several test modules intentionally install different lightweight ``comfy`` mocks.
+Loading and executing one test module at a time avoids pytest collection conflicts
+between those mocks while still exercising every ``test_*`` function in the suite.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 
 def load(path: Path):
-    name = f"_h3_update2_test_{path.stem}"
+    name = f"_h3_repo_test_{path.stem}"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -26,25 +26,27 @@ def load(path: Path):
     return module
 
 
-def main():
+def run_all() -> int:
     passed = 0
     for path in sorted(TESTS.glob("test_*.py")):
+        if path.name == "test_repo_suite.py":
+            continue
         module = load(path)
         funcs = [
             getattr(module, name)
             for name in sorted(dir(module))
             if name.startswith("test_") and callable(getattr(module, name))
         ]
-        if funcs:
-            for fn in funcs:
-                fn()
-                passed += 1
-                print(f"PASS {path.name}::{fn.__name__}")
-        elif callable(getattr(module, "main", None)):
-            module.main()
+        for fn in funcs:
+            fn()
             passed += 1
-            print(f"PASS {path.name}::main")
+            print(f"PASS {path.name}::{fn.__name__}")
     print(f"PASS: {passed} repo CPU/static checks")
+    return passed
+
+
+def main() -> None:
+    run_all()
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def install_fake(native):
+def install_fake(native, aug15=False):
     for name in list(sys.modules):
         if name == "maskpkg" or name.startswith("maskpkg.") or name == "comfy" or name.startswith("comfy."):
             sys.modules.pop(name, None)
@@ -48,12 +48,19 @@ def install_fake(native):
             return None
 
     if native:
-        def process_denoise_mask(self, masks):
-            return masks
-        def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
-            return latent_image
-        MiniMaxH3.process_denoise_mask = process_denoise_mask
-        MiniMaxH3.scale_latent_inpaint = scale_latent_inpaint
+        if aug15:
+            # PR #15375 head after 989e7a9: process_denoise_mask is gone;
+            # token-grid blend alignment happens in scale_latent_inpaint.
+            def scale_latent_inpaint(self, sigma, noise, latent_image, x=None, denoise_mask=None, **kwargs):
+                return latent_image
+            MiniMaxH3.scale_latent_inpaint = scale_latent_inpaint
+        else:
+            def process_denoise_mask(self, masks):
+                return masks
+            def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
+                return latent_image
+            MiniMaxH3.process_denoise_mask = process_denoise_mask
+            MiniMaxH3.scale_latent_inpaint = scale_latent_inpaint
         h3m.mask_row_values = lambda *args: None
         h3m._mod_row = lambda vecs, row, dtype: vecs[row]
 
@@ -98,6 +105,22 @@ def test_native_mask_engine_is_noop():
     assert model_cls.forward is before_forward
     assert cls.process_denoise_mask is before_process
 
+
+
+def test_aug15_native_mask_engine_is_noop_without_process_hook():
+    module, cls, model_cls = install_fake(native=True, aug15=True)
+    before_forward = model_cls.forward
+    before_scale = cls.scale_latent_inpaint
+    assert "process_denoise_mask" not in cls.__dict__
+    status = module.capability_status()
+    assert status["mask_engine_native"]
+    assert status["native_inpaint_mask_alignment"]
+    assert status["mask_model_ready"]
+    assert module.ensure_h3_mask_compat()
+    assert cls.scale_latent_inpaint is before_scale
+    assert model_cls.forward is before_forward
+    assert "process_denoise_mask" not in cls.__dict__
+    assert module.is_ready()
 
 def test_legacy_mask_engine_gets_compatibility():
     module, cls, model_cls = install_fake(native=False)

@@ -4,10 +4,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WF = ROOT / "example_workflows"
 
-SIMPLE = "OLD - Motion Context - Simple - No Reference Images.json"
-ADVANCED = "OLD - Motion Context - Advanced - Reference Images.json"
-MP4 = "OLD - Hybrid - Input Video Extension + Motion Context - Reference Images.json"
-CUSTOM = "UTILITY - Custom Keyframes Example.json"
+SIMPLE = "OLD - Motion Context - Simple.json"
+ADVANCED = "OLD - Motion Context - Advanced.json"
+MP4 = "OLD - Hybrid Extension.json"
+CUSTOM = "UTILITY - Custom Keyframes.json"
 
 
 def _load(name):

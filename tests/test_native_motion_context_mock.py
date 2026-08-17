@@ -60,9 +60,12 @@ def install_module():
     ext.MiniMaxH3ExistingVideoMaskedContext = type("MiniMaxH3ExistingVideoMaskedContext", (), {})
     ext.MiniMaxH3GeneratedAVMaskedContext = type("MiniMaxH3GeneratedAVMaskedContext", (), {})
     ext.MiniMaxH3StartMaskedContext = type("MiniMaxH3StartMaskedContext", (), {})
-    ext.MiniMaxH3StartCheckpointMaskedContext = type("MiniMaxH3StartCheckpointMaskedContext", (), {})
     ext.MiniMaxH3AssembleExtension = type("MiniMaxH3AssembleExtension", (), {})
     sys.modules["nativepkg.existing_video_extension"] = ext
+
+    song = types.ModuleType("nativepkg.h3_song_audio_context")
+    song.MiniMaxH3SongMaskedAVContext = type("MiniMaxH3SongMaskedAVContext", (), {})
+    sys.modules["nativepkg.h3_song_audio_context"] = song
 
     crop = types.ModuleType("nativepkg.h3_auto_crop32")
     crop.MiniMaxH3CropTo32 = type("MiniMaxH3CropTo32", (), {})

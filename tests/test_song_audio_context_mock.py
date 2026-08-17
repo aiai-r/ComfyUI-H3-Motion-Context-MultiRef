@@ -194,3 +194,26 @@ def test_master_song_audio_124_frame_rounding_shortfall_is_grid_padded_not_rejec
     assert am.max() == 0 and am.min() == 0
     # clip_audio remains exactly picture-duration audio, not the grid lookahead.
     assert clip_audio["waveform"].shape[-1] == round(124 / 24 * 32000)
+
+
+def test_master_song_clip_audio_uses_absolute_timeline_sample_endpoints():
+    # Use the same kind of non-integral 24-fps boundary that appears in later
+    # music-video clips. Absolute start/end rounding differs by one sample from
+    # rounding the duration independently.
+    video = torch.zeros((1, 24, 107, 2, 4))  # 107 video tokens cover 362 frames
+    audio = torch.zeros((1, 32, 2, round(362 / 24 * 40)))
+    latent = {"samples": NestedTensor((video, audio))}
+    master_audio = {
+        "waveform": torch.rand((1, 2, 32000 * 40)),
+        "sample_rate": 32000,
+    }
+    start_seconds = 323 / 24
+    node = module.MiniMaxH3SongMaskedAVContext()
+    _out, _n, clip_audio = node.prepare(
+        latent, AudioVAE(), master_audio,
+        clip_start_seconds=start_seconds, context_length=0,
+        source_fps=24.0, crop="disabled", vae=None, source_frames=None,
+    )
+    expected = round((start_seconds + 362 / 24) * 32000) - round(start_seconds * 32000)
+    assert expected == 482666
+    assert clip_audio["waveform"].shape[-1] == expected

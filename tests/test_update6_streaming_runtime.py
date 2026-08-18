@@ -28,8 +28,11 @@ def test_streaming_runtime_uses_one_shot_frames_and_exact_audio_conformance():
     assert "class _OneShotFrameSequence" in stream
     assert "old final RGB buffer" in stream
     assert "_conform_waveform_length" in stream
-    assert "sample_boundary_from_frames(extension_end_frame" in stream
-    assert '_fit_waveform(wave, want, f"Extension {i + 1} audio", pad=False)' in stream
+    assert "extension_start_frame = cumulative_frames - int(contexts[i])" in stream
+    assert "extension_start_sample = sample_boundary_from_frames(" in stream
+    assert "extension_end_sample = sample_boundary_from_frames(" in stream
+    assert "audio_out[..., extension_start_sample:extension_end_sample].copy_(" in stream
+    assert "wave = wave[..., cut:]" not in stream
 
 
 def test_music_stream_is_intermediate_and_terminal_sink_is_output_node():

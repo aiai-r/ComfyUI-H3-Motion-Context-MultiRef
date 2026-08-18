@@ -346,7 +346,13 @@ def _assemble_av_audio(
     raw_frames,
     contexts,
 ):
-    """Existing AV audio assembly, unchanged except separated from RGB output."""
+    """Assemble AV audio with the continuation owning each protected overlap.
+
+    Every extension already contains the previous clip's protected audio context.
+    Keep that full decoded extension audio on the final timeline and replace the
+    corresponding tail of the preceding clip.  This preserves the generation-side
+    audio feather inside the protected prefix instead of discarding it at assembly.
+    """
     audio_sr = int(
         getattr(
             audio_vae,
@@ -357,7 +363,7 @@ def _assemble_av_audio(
     final_frames = int(base_frames) + sum(
         int(raw_frames[i]) - int(contexts[i]) for i in range(len(raw_frames))
     )
-    total_samples = int(round(final_frames / FPS * audio_sr))
+    total_samples = sample_boundary_from_frames(final_frames, audio_sr, FPS)
     audio_out = torch.empty((1, 2, total_samples), dtype=torch.float32, device="cpu")
 
     if mode == "existing_video":
@@ -365,7 +371,7 @@ def _assemble_av_audio(
         wave = _resample_waveform(
             wave, int(source_audio["sample_rate"]), audio_sr, "source_audio"
         )
-        want = int(round(int(base_frames) / FPS * audio_sr))
+        want = sample_boundary_from_frames(int(base_frames), audio_sr, FPS)
         wave = _conform_waveform_length(wave, want, "source audio").detach().to(
             "cpu", torch.float32
         )
@@ -373,11 +379,12 @@ def _assemble_av_audio(
         wave, got_sr = _decode_h3_audio_cpu(audio_vae, base_audio_latent)
         wave = _stereo_first_batch(wave, "starter audio")
         wave = _resample_waveform(wave, got_sr, audio_sr, "starter audio")
-        want = int(round(int(base_frames) / FPS * audio_sr))
+        want = sample_boundary_from_frames(int(base_frames), audio_sr, FPS)
         wave = _conform_waveform_length(wave, want, "starter audio")
 
+    # Seed the buffer with the complete base clip. Each extension below overwrites
+    # the previous clip's final protected-context span with its own full prefix.
     audio_out[..., :want].copy_(wave[..., :want])
-    sample_pos = want
     del wave
     _release_decode_memory()
 
@@ -387,40 +394,42 @@ def _assemble_av_audio(
         wave = _stereo_first_batch(wave, f"Extension {i + 1} audio")
         wave = _resample_waveform(wave, got_sr, audio_sr, f"Extension {i + 1} audio")
 
-        seam_frame = cumulative_frames
-        extension_start_frame = seam_frame - int(contexts[i])
+        extension_start_frame = cumulative_frames - int(contexts[i])
         extension_end_frame = extension_start_frame + int(raw_frames[i])
-        expected_full = (
-            sample_boundary_from_frames(extension_end_frame, audio_sr, FPS)
-            - sample_boundary_from_frames(extension_start_frame, audio_sr, FPS)
-        )
-        wave = _conform_waveform_length(
-            wave, expected_full, f"Extension {i + 1} full audio"
-        )
-
-        seam_sample = sample_boundary_from_frames(seam_frame, audio_sr, FPS)
         extension_start_sample = sample_boundary_from_frames(
             extension_start_frame, audio_sr, FPS
         )
-        cut = seam_sample - extension_start_sample
-        if cut >= int(wave.shape[-1]):
-            raise ValueError(
-                f"h3_streaming_av: Extension {i + 1} audio shorter than protected context"
-            )
-        wave = wave[..., cut:]
+        extension_end_sample = sample_boundary_from_frames(
+            extension_end_frame, audio_sr, FPS
+        )
+        expected_full = extension_end_sample - extension_start_sample
+        wave = _conform_waveform_length(
+            wave, expected_full, f"Extension {i + 1} full audio"
+        ).detach().to("cpu", torch.float32)
 
-        cumulative_frames += int(raw_frames[i]) - int(contexts[i])
-        want_total = int(round(cumulative_frames / FPS * audio_sr))
-        want = want_total - sample_pos
-        wave = _fit_waveform(wave, want, f"Extension {i + 1} audio", pad=False)
-        audio_out[..., sample_pos:want_total].copy_(wave[..., :want])
-        sample_pos = want_total
+        if extension_start_sample < 0 or extension_end_sample > total_samples:
+            raise RuntimeError(
+                f"h3_streaming_av: Extension {i + 1} audio maps outside final timeline"
+            )
+
+        audio_out[..., extension_start_sample:extension_end_sample].copy_(
+            wave[..., :expected_full]
+        )
+        _LOG.info(
+            "h3_streaming_av: Extension %d owns %d-frame protected audio overlap "
+            "from absolute frame %d",
+            i + 1,
+            int(contexts[i]),
+            extension_start_frame,
+        )
+        cumulative_frames = extension_end_frame
         del wave
         _release_decode_memory()
 
-    if sample_pos != total_samples:
+    if cumulative_frames != final_frames:
         raise RuntimeError(
-            f"h3_streaming_av: wrote {sample_pos} audio samples, expected {total_samples}"
+            f"h3_streaming_av: audio timeline ended at frame {cumulative_frames}, "
+            f"expected {final_frames}"
         )
     return {"waveform": audio_out, "sample_rate": audio_sr}
 

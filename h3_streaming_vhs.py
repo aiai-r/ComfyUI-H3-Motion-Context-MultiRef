@@ -531,9 +531,9 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
                 {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001},
             ),
             "crop": (["disabled", "center"], {"default": "disabled"}),
-            "include_source_in_output": ("BOOLEAN", {"default": True}),
         }
         required.update(_vhs_h264_inputs("video/masked_av_extension", True))
+        required["include_source_in_output"] = ("BOOLEAN", {"default": True})
         optional = {
             "source_frames": ("IMAGE", {"lazy": True}),
             "source_audio": ("AUDIO", {"lazy": True}),

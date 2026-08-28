@@ -23,6 +23,16 @@ def test_direct_streaming_runtime_is_registered_and_experimental_paths_are_absen
     assert "class MiniMaxH3AssembleLiveMusicVideo" not in (ROOT / "h3_song_audio_context.py").read_text(encoding="utf-8")
 
 
+def test_batch_output_widget_is_appended_after_existing_vhs_widgets():
+    stream = (ROOT / "h3_streaming_vhs.py").read_text(encoding="utf-8")
+    node = stream.split("class MiniMaxH3StreamLiveExtensionAVToVHS:", 1)[1]
+    node = node.split("class MiniMaxH3FinalizeVHSOutput:", 1)[0]
+    vhs_inputs = node.index("required.update(_vhs_h264_inputs")
+    batch_option = node.index('required["include_source_in_output"]')
+    optional_inputs = node.index("optional = {")
+    assert vhs_inputs < batch_option < optional_inputs
+
+
 def test_streaming_runtime_uses_one_shot_frames_and_exact_audio_conformance():
     stream = (ROOT / "h3_streaming_vhs.py").read_text(encoding="utf-8")
     assert "class _OneShotFrameSequence" in stream

@@ -183,11 +183,10 @@ def _conform_waveform_length(waveform, want, label, max_fractional_change=0.005)
     audio latent must use an integer number of ticks and the decoded waveform can
     be a few milliseconds shorter than the exact video duration.
 
-    For these *small* mismatches, appending silence creates an artificial gap at
-    every extension seam.  Instead, resample the waveform by the tiny rational
-    ratio needed to make its duration match the exact frame-derived sample span.
-    Larger mismatches are not treated as timing-grid drift and are rejected
-    rather than silently repaired.
+    Audio beyond the exact video endpoint is trimmed.  For a small audio
+    undershoot, resample by the tiny rational ratio needed to match the exact
+    frame-derived sample span instead of appending an artificial silence gap.
+    Larger undershoots are rejected rather than silently repaired.
     """
     want = int(want)
     have = int(waveform.shape[-1])
@@ -198,6 +197,14 @@ def _conform_waveform_length(waveform, want, label, max_fractional_change=0.005)
             "h3_masked_extension: %s has invalid sample length %d -> %d"
             % (label, have, want)
         )
+
+    if have > want:
+        _LOG.info(
+            "h3_masked_extension: trimming %s by %d samples to exact video timeline",
+            label,
+            have - want,
+        )
+        return waveform[..., :want].contiguous()
 
     fractional_change = abs(want - have) / float(want)
     if fractional_change > float(max_fractional_change):

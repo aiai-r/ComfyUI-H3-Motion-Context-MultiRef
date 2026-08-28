@@ -284,6 +284,13 @@ def test_real_h3_audio_undershoot_lengths_conform_exactly_without_zero_tail():
         assert torch.count_nonzero(out[..., -32:]) == out[..., -32:].numel()
 
 
+def test_container_audio_overshoot_is_trimmed_to_exact_video_timeline():
+    wave = torch.arange(483328, dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    out = module._conform_waveform_length(wave, 477333, "cloud boundary source audio")
+    assert out.shape == (1, 2, 477333)
+    assert torch.equal(out, wave[..., :477333])
+
+
 def test_audio_timebase_conform_rejects_large_duration_mismatch():
     wave = torch.ones((1, 2, 1000), dtype=torch.float32)
     try:

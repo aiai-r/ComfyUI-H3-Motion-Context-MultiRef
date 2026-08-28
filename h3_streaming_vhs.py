@@ -12,6 +12,7 @@ No custom object is exposed as a ComfyUI IMAGE output. The internal one-shot seq
 from __future__ import annotations
 
 import inspect
+import itertools
 import logging
 
 import torch
@@ -530,6 +531,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
                 {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001},
             ),
             "crop": (["disabled", "center"], {"default": "disabled"}),
+            "include_source_in_output": ("BOOLEAN", {"default": True}),
         }
         required.update(_vhs_h264_inputs("video/masked_av_extension", True))
         optional = {
@@ -570,6 +572,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
         video_overlap_frames,
         source_fps,
         crop,
+        include_source_in_output,
         filename_prefix,
         pix_fmt,
         crf,
@@ -605,6 +608,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
         video_overlap_frames=39,
         source_fps=24.0,
         crop="disabled",
+        include_source_in_output=True,
         filename_prefix="video/masked_av_extension",
         pix_fmt="yuv420p",
         crf=19,
@@ -671,7 +675,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
             contexts.append(ctx)
             available = frames
 
-        final_frames = base_frames + sum(
+        full_final_frames = base_frames + sum(
             int(raw_frames[i]) - int(contexts[i]) for i in range(count)
         )
         audio = _assemble_av_audio(
@@ -686,7 +690,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
         )
 
         if mode == "existing_video":
-            factory = lambda: _existing_base_and_generated_extensions_generator(
+            full_factory = lambda: _existing_base_and_generated_extensions_generator(
                 video_vae,
                 source_frames,
                 source_idx,
@@ -702,7 +706,7 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
             videos = [base_video_latent] + ext_videos
             all_raw = [base_frames] + raw_frames
             all_contexts = [0] + contexts
-            factory = lambda: _generated_frame_generator(
+            full_factory = lambda: _generated_frame_generator(
                 video_vae,
                 videos,
                 all_raw,
@@ -710,6 +714,18 @@ class MiniMaxH3StreamLiveExtensionAVToVHS:
                 video_overlap_frames,
                 "h3_streaming_av",
             )
+
+        skip_frames = base_frames if mode == "existing_video" and not include_source_in_output else 0
+        final_frames = full_final_frames - skip_frames
+        if skip_frames:
+            factory = lambda: itertools.islice(full_factory(), skip_frames, None)
+            start_sample = sample_boundary_from_frames(skip_frames, int(audio["sample_rate"]), FPS)
+            audio = {
+                "waveform": audio["waveform"][..., start_sample:].contiguous(),
+                "sample_rate": audio["sample_rate"],
+            }
+        else:
+            factory = full_factory
 
         frames = _OneShotFrameSequence(final_frames, factory)
         max_hold = max(_seam_overlaps([base_frames] + raw_frames, [0] + contexts, video_overlap_frames))

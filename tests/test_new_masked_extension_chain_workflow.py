@@ -67,13 +67,20 @@ def test_starter_is_reference_to_video_plus_frame1_keyframe():
 
 def test_reference_images_feed_every_reference_to_video_node_directly():
     data=load(); nodes=_nodes(data); links=_links(data)
-    ref_loaders={1020,1021}
-    assert all(nodes[i]['type']=='LoadImage' for i in ref_loaders)
+    ref_loaders=sorted(
+        (n for n in nodes.values() if n.get('title','').startswith('REFERENCE IMAGE ')),
+        key=lambda n:int(n['title'].split('REFERENCE IMAGE ',1)[1].split(' ',1)[0]),
+    )
+    assert len(ref_loaders)==9
+    assert all(n['type']=='LoadImage' for n in ref_loaders)
+    assert all(n.get('mode')==4 for n in ref_loaders[2:])
+    assert all(n['widgets_values'][0]=='' for n in ref_loaders[2:])
     for n in nodes.values():
         if n['type']!='MiniMaxH3ReferenceToVideo': continue
-        l0=links[_input(n,'ref_images.ref_image_0')['link']]
-        l1=links[_input(n,'ref_images.ref_image_1')['link']]
-        assert l0[1]==1020 and l1[1]==1021
+        sockets=[_input(n,f'ref_images.ref_image_{i}') for i in range(9)]
+        assert all(socket['link'] is not None for socket in sockets)
+        assert [links[socket['link']][1] for socket in sockets] == [
+            loader['id'] for loader in ref_loaders]
 
 
 def test_optional_reference_audio_uses_one_reroute_per_slot_and_feeds_all_r2v():
